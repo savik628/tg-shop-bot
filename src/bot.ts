@@ -148,9 +148,13 @@ bot.callbackQuery("claim_admin_click", async (ctx) => {
   }
   dbService.setAdminId(uid);
   await ctx.answerCallbackQuery({ text: "Вы назначены владельцем!" });
-  await ctx.reply(`🎉 Вы успешно назначены владельцем склада.`, {
-    reply_markup: getBottomKeyboard(ctx)
-  });
+  await ctx.reply(
+    `🎉 **Вы назначены владельцем склада!**\n\n🆔 Ваш Telegram ID: \`${uid}\`\n\n💡 _Чтобы статус админа сохранялся всегда при перезапусках Render, укажите в Render (Environment):_\n\`ADMIN_ID=${uid}\``,
+    {
+      parse_mode: "Markdown",
+      reply_markup: getBottomKeyboard(ctx)
+    }
+  );
   await showAdminPanel(ctx);
 });
 
@@ -164,9 +168,13 @@ bot.command("claim_admin", async (ctx) => {
     return;
   }
   dbService.setAdminId(uid);
-  await ctx.reply(`🎉 Поздравляем! Вы назначены владельцем бота.`, {
-    reply_markup: getBottomKeyboard(ctx)
-  });
+  await ctx.reply(
+    `🎉 **Вы назначены владельцем бота!**\n\n🆔 Ваш ID: \`${uid}\`\n\n💡 _Для постоянного сохранения на Render добавьте переменную:_\n\`ADMIN_ID=${uid}\``,
+    {
+      parse_mode: "Markdown",
+      reply_markup: getBottomKeyboard(ctx)
+    }
+  );
   await showAdminPanel(ctx);
 });
 
@@ -258,9 +266,9 @@ async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
   // 3. Блок управления для администратора внутри папки
   if (isAdm) {
     if (categoryId !== null) {
-      kb.text("📁 + Создать папки", `admin_add_subcat_${categoryId}`);
-      kb.text("⚡️ + Товары списком", `admin_add_batch_${categoryId}`).row();
-      kb.text("➕ Товар (поштучно)", `admin_add_single_${categoryId}`);
+      kb.text("➕ Добавить товар", `admin_add_single_${categoryId}`);
+      kb.text("⚡️ Товары списком", `admin_add_batch_${categoryId}`).row();
+      kb.text("📁 + Создать подпапки", `admin_add_subcat_${categoryId}`);
       kb.text("✏️ Переименовать", `admin_rename_cat_${categoryId}`).row();
       kb.text("🗑 Удалить эту папку", `admin_del_cat_${categoryId}`).row();
     } else {
@@ -404,9 +412,9 @@ bot.callbackQuery(/^prod_(\d+)$/, async (ctx) => {
   }
 
   if (isAdmin(ctx)) {
-    kb.text("✏️ Изменить остаток", `edit_stock_${product.id}`);
-    kb.text("💰 Изменить цену", `edit_price_${product.id}`).row();
-    kb.text("❌ Удалить этот товар", `admin_del_prod_${product.id}`).row();
+    kb.text("🗑 Удалить товар", `admin_del_prod_${product.id}`).row();
+    kb.text("💰 Изменить цену", `edit_price_${product.id}`);
+    kb.text("📦 Изменить остаток", `edit_stock_${product.id}`).row();
   }
 
   kb.text("🛒 В корзину", "menu_cart");

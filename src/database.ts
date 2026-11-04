@@ -54,6 +54,32 @@ try {
   db.exec("ALTER TABLE categories ADD COLUMN parent_id INTEGER DEFAULT NULL REFERENCES categories(id) ON DELETE CASCADE");
 } catch {}
 
+// Гарантированное создание структуры категорий по умолчанию (Чаши, Табак -> Спектрум, Блэкберн, Мастхэв, Трофимов, Кальяны)
+function ensureDefaultCategories() {
+  const findCat = (name: string, parentId: number | null) => {
+    return parentId === null
+      ? (db.prepare("SELECT id FROM categories WHERE name = ? AND parent_id IS NULL").get(name) as { id: number } | undefined)
+      : (db.prepare("SELECT id FROM categories WHERE name = ? AND parent_id = ?").get(name, parentId) as { id: number } | undefined);
+  };
+
+  const getOrCreate = (name: string, parentId: number | null = null): number => {
+    const existing = findCat(name, parentId);
+    if (existing) return existing.id;
+    const info = db.prepare("INSERT INTO categories (name, parent_id) VALUES (?, ?)").run(name, parentId);
+    return Number(info.lastInsertRowid);
+  };
+
+  getOrCreate("Чаши", null);
+  const tabakId = getOrCreate("Табак", null);
+  getOrCreate("Кальяны", null);
+
+  getOrCreate("Спектрум", tabakId);
+  getOrCreate("Блэкберн", tabakId);
+  getOrCreate("Мастхэв", tabakId);
+  getOrCreate("Трофимов", tabakId);
+}
+ensureDefaultCategories();
+
 export interface Category {
   id: number;
   parent_id: number | null;
