@@ -192,6 +192,17 @@ export const dbService = {
     db.prepare("DELETE FROM cart WHERE user_id = ?").run(userId);
   },
 
+  // Статистика магазина
+  getStats(): { ordersCount: number; totalSales: number; productsCount: number } {
+    const orders = db.prepare("SELECT COUNT(*) as count, IFNULL(SUM(total_price), 0) as total FROM orders").get() as { count: number; total: number };
+    const prods = db.prepare("SELECT COUNT(*) as count FROM products").get() as { count: number };
+    return {
+      ordersCount: orders.count,
+      totalSales: orders.total,
+      productsCount: prods.count
+    };
+  },
+
   // Оформление заявки (транзакция со списанием остатков)
   checkoutOrder(
     userId: number,
