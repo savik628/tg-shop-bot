@@ -2,12 +2,13 @@ import { Bot, InlineKeyboard, Keyboard, session } from "grammy";
 import { conversations, createConversation } from "@grammyjs/conversations";
 import dotenv from "dotenv";
 import http from "node:http";
-import { MyContext } from "./types.js";
+import { MyContext, SessionData } from "./types.js";
 import { dbService } from "./database.js";
 import {
   checkoutConversation,
   addCategoryConversation,
-  addProductConversation,
+  addBatchProductsConversation,
+  addSingleProductConversation,
   updateStockConversation,
   updatePriceConversation
 } from "./conversations.js";
@@ -16,19 +17,19 @@ dotenv.config();
 
 const token = process.env.BOT_TOKEN;
 if (!token) {
-  console.error("ОШИБКА: BOT_TOKEN не указан в файле .env!");
+  console.error("ОШИБКА: BOT_TOKEN не указан!");
   process.exit(1);
 }
 
 export const bot = new Bot<MyContext>(token);
 
-// Middleware сессий и диалогов
-bot.use(session({ initial: () => ({}) }));
+bot.use(session({ initial: (): SessionData => ({ targetCategoryId: null }) }));
 bot.use(conversations());
 
 bot.use(createConversation(checkoutConversation));
 bot.use(createConversation(addCategoryConversation));
-bot.use(createConversation(addProductConversation));
+bot.use(createConversation(addBatchProductsConversation));
+bot.use(createConversation(addSingleProductConversation));
 bot.use(createConversation(updateStockConversation));
 bot.use(createConversation(updatePriceConversation));
 
@@ -54,37 +55,35 @@ function getBottomKeyboard(ctx: MyContext): Keyboard {
   return kb.resized();
 }
 
-// Главная инлайн-клавиатура
+// Главное меню
 function getMainMenu(ctx: MyContext): InlineKeyboard {
   const kb = new InlineKeyboard()
-    .text("🛍 Каталог товаров", "menu_catalog")
+    .text("🛍 Открыть каталог", "cat_nav_root")
     .row()
     .text("🛒 Моя корзина", "menu_cart")
     .row();
 
   if (isAdmin(ctx)) {
-    kb.text("⚙️ Панель управления", "admin_main").row();
+    kb.text("⚙️ Админ-панель", "admin_main").row();
   }
 
   return kb;
 }
 
-// Отображение админ-панели
+// Функция отображения админ-панели
 async function showAdminPanel(ctx: MyContext) {
   const stats = dbService.getStats();
   const text = `⚙️ **Панель управления магазином**\n\n` +
-    `📊 **Статистика:**\n` +
-    `• Товаров в каталоге: **${stats.productsCount}**\n` +
-    `• Оформлено заказов: **${stats.ordersCount}**\n` +
-    `• Общая сумма заказов: **${stats.totalSales} ₽**\n\n` +
-    `Выберите действие:`;
+    `📊 **Статистика склада и продаж:**\n` +
+    `• Всего товаров: **${stats.productsCount} шт.**\n` +
+    `• Оформлено заявок: **${stats.ordersCount}**\n` +
+    `• Сумма продаж: **${stats.totalSales} ₽**\n\n` +
+    `📁 _В многоуровневом каталоге вы можете добавлять категории любой вложенности и массово загружать товары списком._`;
 
   const kb = new InlineKeyboard()
-    .text("➕ Добавить товар", "admin_add_prod").row()
-    .text("📦 Склад и остатки (изменить/удалить)", "admin_products_list").row()
-    .text("🏷 Добавить категорию", "admin_add_cat").row()
-    .text("🗑 Удалить категорию", "admin_del_cat").row()
-    .text("🔄 Обновить статистику", "admin_main").row()
+    .text("🏷 Создать корневую категорию", "admin_create_root_cat").row()
+    .text("🗂 Управление каталогом и товарами", "cat_nav_root").row()
+    .text("🔄 Обновить статистику", "admin_refresh").row()
     .text("◀️ Главное меню", "menu_main");
 
   if (ctx.callbackQuery) {
@@ -98,23 +97,32 @@ async function showAdminPanel(ctx: MyContext) {
   }
 }
 
-// Команда /start
+// Удаление сообщения пользователя для поддержания чистоты чата
+async function deleteUserMessage(ctx: MyContext) {
+  try {
+    await ctx.deleteMessage();
+  } catch {}
+}
+
+// ======================== КОМАНДЫ ========================
+
 bot.command("start", async (ctx) => {
+  await deleteUserMessage(ctx);
   const name = ctx.from?.first_name || "друг";
-  const text = `👋 Привет, ${name}!\n\nДобро пожаловать в наш онлайн-каталог.\nИспользуйте кнопки меню внизу для быстрой навигации:`;
+  const text = `👋 Привет, ${name}!\n\nДобро пожаловать в каталог товаров.\nДля быстрого перехода используйте меню ниже:`;
   await ctx.reply(text, { reply_markup: getBottomKeyboard(ctx) });
-  await ctx.reply("Выберите действие:", { reply_markup: getMainMenu(ctx) });
+  await ctx.reply("Выберите раздел:", { reply_markup: getMainMenu(ctx) });
 });
 
-// Команда /admin
 bot.command("admin", async (ctx) => {
+  await deleteUserMessage(ctx);
   const uid = ctx.from?.id;
   if (!uid) return;
-  const currentAdmin = dbService.getAdminId();
 
+  const currentAdmin = dbService.getAdminId();
   if (!currentAdmin) {
     const kb = new InlineKeyboard().text("👑 Назначить себя владельцем", "claim_admin_click");
-    await ctx.reply("⚠️ Владелец бота ещё не назначен!\nНажмите кнопку ниже, чтобы стать администратором:", {
+    await ctx.reply("⚠️ Владелец бота ещё не назначен!\nНажмите кнопку, чтобы стать администратором:", {
       reply_markup: kb
     });
     return;
@@ -128,7 +136,6 @@ bot.command("admin", async (ctx) => {
   await showAdminPanel(ctx);
 });
 
-// Нажатие на инлайн кнопку стать админом
 bot.callbackQuery("claim_admin_click", async (ctx) => {
   const uid = ctx.from?.id;
   if (!uid) return;
@@ -139,56 +146,55 @@ bot.callbackQuery("claim_admin_click", async (ctx) => {
   }
   dbService.setAdminId(uid);
   await ctx.answerCallbackQuery({ text: "Вы назначены владельцем!" });
-  await ctx.reply(`🎉 Поздравляем! Вы успешно назначены владельцем бота.\nВам добавлена кнопка «⚙️ Админ-панель» внизу.`, {
+  await ctx.reply(`🎉 Вы успешно назначены владельцем бота.`, {
     reply_markup: getBottomKeyboard(ctx)
   });
   await showAdminPanel(ctx);
 });
 
-// Команда /id
 bot.command("id", async (ctx) => {
+  await deleteUserMessage(ctx);
   const uid = ctx.from?.id;
   const currentAdmin = dbService.getAdminId();
   const isAdm = currentAdmin === uid;
   await ctx.reply(
     `🆔 Ваш Telegram ID: \`${uid}\`\n👑 Статус: ${isAdm ? "**Владелец (Администратор)**" : "Покупатель"}\n\n${
-      !currentAdmin
-        ? "⚠️ Владелец бота ещё не назначен! Отправьте команду /claim_admin, чтобы стать владельцем."
-        : ""
+      !currentAdmin ? "⚠️ Владелец бота не назначен! Используйте /claim_admin" : ""
     }`,
     { parse_mode: "Markdown" }
   );
 });
 
-// Команда /claim_admin
 bot.command("claim_admin", async (ctx) => {
+  await deleteUserMessage(ctx);
   const uid = ctx.from?.id;
   if (!uid) return;
-
   const currentAdmin = dbService.getAdminId();
   if (currentAdmin && currentAdmin !== uid) {
     await ctx.reply("❌ У этого бота уже назначен другой владелец.");
     return;
   }
-
   dbService.setAdminId(uid);
-  await ctx.reply(`🎉 Поздравляем! Вы успешно назначены владельцем бота (ID: \`${uid}\`).\nТеперь вам доступна кнопка «⚙️ Админ-панель».`, {
-    parse_mode: "Markdown",
+  await ctx.reply(`🎉 Поздравляем! Вы назначены владельцем бота.`, {
     reply_markup: getBottomKeyboard(ctx)
   });
   await showAdminPanel(ctx);
 });
 
-// Обработчики нижних кнопок
+// ======================== ОБРАБОТЧИКИ НИЖНИХ КНОПОК ========================
+
 bot.hears("🛍 Каталог", async (ctx) => {
-  await showCatalog(ctx);
+  await deleteUserMessage(ctx);
+  await renderCategoryView(ctx, null);
 });
 
 bot.hears("🛒 Корзина", async (ctx) => {
-  await showCart(ctx);
+  await deleteUserMessage(ctx);
+  await renderCartView(ctx);
 });
 
 bot.hears("⚙️ Админ-панель", async (ctx) => {
+  await deleteUserMessage(ctx);
   if (!isAdmin(ctx)) {
     await ctx.reply("❌ Доступ в панель управления запрещен.");
     return;
@@ -197,105 +203,157 @@ bot.hears("⚙️ Админ-панель", async (ctx) => {
 });
 
 bot.hears("ℹ️ Мой ID", async (ctx) => {
+  await deleteUserMessage(ctx);
   const uid = ctx.from?.id;
-  const currentAdmin = dbService.getAdminId();
-  const isAdm = currentAdmin === uid;
-  await ctx.reply(
-    `🆔 Ваш Telegram ID: \`${uid}\`\n👑 Статус: ${isAdm ? "**Владелец (Администратор)**" : "Покупатель"}\n\n${
-      !currentAdmin
-        ? "⚠️ Владелец бота ещё не назначен! Отправьте команду /claim_admin, чтобы стать владельцем."
-        : ""
-    }`,
-    { parse_mode: "Markdown" }
-  );
+  const isAdm = dbService.getAdminId() === uid;
+  await ctx.reply(`🆔 Ваш Telegram ID: \`${uid}\`\n👑 Статус: ${isAdm ? "**Владелец**" : "Покупатель"}`, {
+    parse_mode: "Markdown"
+  });
 });
 
-// Кнопка перехода в главное меню
 bot.callbackQuery("menu_main", async (ctx) => {
   await ctx.answerCallbackQuery();
   await ctx.editMessageText("Главное меню:", { reply_markup: getMainMenu(ctx) });
 });
 
-// ======================= КАТАЛОГ =======================
+bot.callbackQuery("admin_main", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isAdmin(ctx)) return;
+  await showAdminPanel(ctx);
+});
 
-async function showCatalog(ctx: MyContext) {
-  const categories = dbService.getCategories();
+bot.callbackQuery("admin_refresh", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "Статистика обновлена" });
+  if (!isAdmin(ctx)) return;
+  await showAdminPanel(ctx);
+});
 
-  if (categories.length === 0) {
-    const kb = new InlineKeyboard();
-    if (isAdmin(ctx)) {
-      kb.text("➕ Добавить категорию", "admin_add_cat").row();
-    }
-    kb.text("◀️ Главное меню", "menu_main");
-    const msg = "Каталог пока пуст. Скоро здесь появятся товары!";
-    if (ctx.callbackQuery) {
-      await ctx.editMessageText(msg, { reply_markup: kb });
-    } else {
-      await ctx.reply(msg, { reply_markup: kb });
-    }
-    return;
-  }
+// ======================== МНОГОУРОВНЕВЫЙ КАТАЛОГ ========================
+
+async function renderCategoryView(ctx: MyContext, categoryId: number | null) {
+  const isAdm = isAdmin(ctx);
+  const subcategories = dbService.getCategories(categoryId);
+  const products = categoryId !== null ? dbService.getProductsByCategory(categoryId) : [];
+  const currentCategory = categoryId !== null ? dbService.getCategoryById(categoryId) : null;
+  const pathTitle = categoryId !== null ? dbService.getCategoryPathString(categoryId) : "Каталог товаров";
 
   const kb = new InlineKeyboard();
-  categories.forEach((cat, index) => {
-    kb.text(cat.name, `cat_${cat.id}`);
-    if (index % 2 === 1) kb.row();
-  });
-  if (categories.length % 2 !== 0) kb.row();
-  kb.text("🛒 Корзина", "menu_cart").row();
-  kb.text("◀️ Главное меню", "menu_main");
 
-  const text = "📂 **Выберите категорию:**";
+  // Кнопки подкатегорий
+  subcategories.forEach((sub, idx) => {
+    kb.text(`📁 ${sub.name}`, `cat_nav_${sub.id}`);
+    if (idx % 2 === 1) kb.row();
+  });
+  if (subcategories.length % 2 !== 0) kb.row();
+
+  // Кнопки товаров внутри этой категории
+  products.forEach((p) => {
+    const status = p.stock > 0 ? `${p.price} ₽` : "❌ Нет в наличии";
+    kb.text(`📦 ${p.name} (${status})`, `prod_${p.id}`).row();
+  });
+
+  // Админские действия для текущей категории
+  if (isAdm) {
+    if (categoryId !== null) {
+      kb.text("⚡️ Добавить товары списком", `admin_add_batch_${categoryId}`).row();
+      kb.text("➕ Добавить товар (поштучно)", `admin_add_single_${categoryId}`).row();
+      kb.text("📁 Создать подкатегорию здесь", `admin_add_subcat_${categoryId}`).row();
+      kb.text("🗑 Удалить эту категорию", `admin_del_cat_${categoryId}`).row();
+    } else {
+      kb.text("🏷 Создать категорию", "admin_create_root_cat").row();
+    }
+  }
+
+  // Кнопки навигации
+  kb.text("🛒 Корзина", "menu_cart");
+  if (categoryId !== null && currentCategory) {
+    const backTarget = currentCategory.parent_id !== null ? `cat_nav_${currentCategory.parent_id}` : "cat_nav_root";
+    kb.text("◀️ Назад", backTarget).row();
+  } else {
+    kb.text("◀️ Главное меню", "menu_main").row();
+  }
+
+  let text = `📂 **${pathTitle}**\n\n`;
+  if (subcategories.length === 0 && products.length === 0) {
+    text += isAdm
+      ? "_Здесь пока нет товаров и подкатегорий. Используйте кнопки ниже для добавления._"
+      : "_В этом разделе пока нет товаров._";
+  } else {
+    text += `Выберите подкатегорию или товар:`;
+  }
+
   if (ctx.callbackQuery) {
-    await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb });
+    try {
+      await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb });
+    } catch {
+      await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
+    }
   } else {
     await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
   }
 }
 
-bot.callbackQuery("menu_catalog", async (ctx) => {
+bot.callbackQuery("cat_nav_root", async (ctx) => {
   await ctx.answerCallbackQuery();
-  await showCatalog(ctx);
+  await renderCategoryView(ctx, null);
 });
 
-// Просмотр категории (список товаров)
-bot.callbackQuery(/^cat_(\d+)$/, async (ctx) => {
+bot.callbackQuery(/^cat_nav_(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  const categoryId = parseInt(ctx.match[1], 10);
-  const category = dbService.getCategoryById(categoryId);
-
-  if (!category) {
-    await ctx.editMessageText("Категория не найдена.", { reply_markup: getMainMenu(ctx) });
-    return;
-  }
-
-  const products = dbService.getProductsByCategory(categoryId);
-  const kb = new InlineKeyboard();
-
-  if (products.length === 0) {
-    kb.text("◀️ Назад к категориям", "menu_catalog");
-    await ctx.editMessageText(`В категории **"${category.name}"** пока нет товаров.`, {
-      parse_mode: "Markdown",
-      reply_markup: kb
-    });
-    return;
-  }
-
-  products.forEach((p) => {
-    const status = p.stock > 0 ? `${p.price} ₽` : "❌ Нет в наличии";
-    kb.text(`${p.name} (${status})`, `prod_${p.id}`).row();
-  });
-
-  kb.text("🛒 Корзина", "menu_cart").row();
-  kb.text("◀️ Назад к категориям", "menu_catalog");
-
-  await ctx.editMessageText(`📂 Категория: **${category.name}**\nВыберите товар:`, {
-    parse_mode: "Markdown",
-    reply_markup: kb
-  });
+  const catId = parseInt(ctx.match[1], 10);
+  await renderCategoryView(ctx, catId);
 });
 
-// Карточка товара
+// Создание категории в корне
+bot.callbackQuery("admin_create_root_cat", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isAdmin(ctx)) return;
+  (ctx.session as any).targetCategoryId = null;
+  await ctx.conversation.enter("addCategoryConversation");
+});
+
+// Создание подкатегории
+bot.callbackQuery(/^admin_add_subcat_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isAdmin(ctx)) return;
+  const parentId = parseInt(ctx.match[1], 10);
+  (ctx.session as any).targetCategoryId = parentId;
+  await ctx.conversation.enter("addCategoryConversation");
+});
+
+// Массовое добавление товаров
+bot.callbackQuery(/^admin_add_batch_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isAdmin(ctx)) return;
+  const catId = parseInt(ctx.match[1], 10);
+  (ctx.session as any).targetCategoryId = catId;
+  await ctx.conversation.enter("addBatchProductsConversation");
+});
+
+// Одиночное добавление товара
+bot.callbackQuery(/^admin_add_single_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isAdmin(ctx)) return;
+  const catId = parseInt(ctx.match[1], 10);
+  (ctx.session as any).targetCategoryId = catId;
+  await ctx.conversation.enter("addSingleProductConversation");
+});
+
+// Удаление категории
+bot.callbackQuery(/^admin_del_cat_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isAdmin(ctx)) return;
+  const catId = parseInt(ctx.match[1], 10);
+  const cat = dbService.getCategoryById(catId);
+  const parentId = cat?.parent_id ?? null;
+
+  dbService.deleteCategory(catId);
+  await ctx.answerCallbackQuery({ text: "Категория и её содержимое удалены" });
+  await renderCategoryView(ctx, parentId);
+});
+
+// ======================== КАРТОЧКА ТОВАРА ========================
+
 bot.callbackQuery(/^prod_(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const productId = parseInt(ctx.match[1], 10);
@@ -320,8 +378,15 @@ bot.callbackQuery(/^prod_(\d+)$/, async (ctx) => {
   if (inStock) {
     kb.text("➕ Добавить в корзину", `cart_add_${product.id}`).row();
   }
-  kb.text("🛒 Перейти в корзину", "menu_cart").row();
-  kb.text("◀️ Назад к списку", `cat_${product.category_id}`);
+
+  if (isAdmin(ctx)) {
+    kb.text("✏️ Изменить остаток", `edit_stock_${product.id}`);
+    kb.text("💰 Изменить цену", `edit_price_${product.id}`).row();
+    kb.text("❌ Удалить этот товар", `admin_del_prod_${product.id}`).row();
+  }
+
+  kb.text("🛒 В корзину", "menu_cart");
+  kb.text("◀️ Назад к категории", `cat_nav_${product.category_id}`).row();
 
   await ctx.editMessageText(text, {
     parse_mode: "Markdown",
@@ -342,14 +407,22 @@ bot.callbackQuery(/^cart_add_(\d+)$/, async (ctx) => {
     return;
   }
 
-  await ctx.answerCallbackQuery({ text: "✅ Товар добавлен в корзину!" });
+  await ctx.answerCallbackQuery({ text: "✅ Добавлено в корзину!" });
 
   const product = dbService.getProductById(productId);
   if (product) {
-    const kb = new InlineKeyboard()
-      .text("➕ Добавить ещё (+1)", `cart_add_${product.id}`).row()
-      .text("🛒 Перейти в корзину", "menu_cart").row()
-      .text("◀️ Назад к списку", `cat_${product.category_id}`);
+    const inStock = product.stock > 0;
+    const kb = new InlineKeyboard();
+    if (inStock) {
+      kb.text("➕ Добавить ещё (+1)", `cart_add_${product.id}`).row();
+    }
+    if (isAdmin(ctx)) {
+      kb.text("✏️ Изменить остаток", `edit_stock_${product.id}`);
+      kb.text("💰 Изменить цену", `edit_price_${product.id}`).row();
+      kb.text("❌ Удалить этот товар", `admin_del_prod_${product.id}`).row();
+    }
+    kb.text("🛒 В корзину", "menu_cart");
+    kb.text("◀️ Назад к категории", `cat_nav_${product.category_id}`).row();
 
     try {
       await ctx.editMessageReplyMarkup({ reply_markup: kb });
@@ -357,9 +430,37 @@ bot.callbackQuery(/^cart_add_(\d+)$/, async (ctx) => {
   }
 });
 
-// ======================= КОРЗИНА =======================
+// Изменение остатка
+bot.callbackQuery(/^edit_stock_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isAdmin(ctx)) return;
+  await ctx.conversation.enter("updateStockConversation");
+});
 
-async function showCart(ctx: MyContext) {
+// Изменение цены
+bot.callbackQuery(/^edit_price_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isAdmin(ctx)) return;
+  await ctx.conversation.enter("updatePriceConversation");
+});
+
+// Удаление товара
+bot.callbackQuery(/^admin_del_prod_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isAdmin(ctx)) return;
+  const prodId = parseInt(ctx.match[1], 10);
+  const prod = dbService.getProductById(prodId);
+  if (prod) {
+    const catId = prod.category_id;
+    dbService.deleteProduct(prodId);
+    await ctx.answerCallbackQuery({ text: `Товар "${prod.name}" удалён` });
+    await renderCategoryView(ctx, catId);
+  }
+});
+
+// ======================== КОРЗИНА И ОФОРМЛЕНИЕ ========================
+
+async function renderCartView(ctx: MyContext) {
   const userId = ctx.from?.id;
   if (!userId) return;
 
@@ -367,15 +468,17 @@ async function showCart(ctx: MyContext) {
 
   if (cart.length === 0) {
     const kb = new InlineKeyboard()
-      .text("🛍 Перейти в каталог", "menu_catalog")
+      .text("🛍 Перейти в каталог", "cat_nav_root")
       .row()
       .text("◀️ Главное меню", "menu_main");
 
-    const emptyMsg = "🛒 **Ваша корзина пуста.**\n\nВыберите товары в каталоге, чтобы оформить заявку.";
+    const emptyText = "🛒 **Ваша корзина пуста.**\n\nВыберите товары в каталоге, чтобы оформить заявку.";
     if (ctx.callbackQuery) {
-      await ctx.editMessageText(emptyMsg, { parse_mode: "Markdown", reply_markup: kb });
+      try {
+        await ctx.editMessageText(emptyText, { parse_mode: "Markdown", reply_markup: kb });
+      } catch {}
     } else {
-      await ctx.reply(emptyMsg, { parse_mode: "Markdown", reply_markup: kb });
+      await ctx.reply(emptyText, { parse_mode: "Markdown", reply_markup: kb });
     }
     return;
   }
@@ -400,11 +503,13 @@ async function showCart(ctx: MyContext) {
 
   kb.text("✅ Оформить заявку", "cart_checkout").row();
   kb.text("🗑 Очистить всю корзину", "cart_clear").row();
-  kb.text("🛍 Продолжить покупки", "menu_catalog").row();
+  kb.text("🛍 В каталог", "cat_nav_root").row();
   kb.text("◀️ Главное меню", "menu_main");
 
   if (ctx.callbackQuery) {
-    await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb });
+    try {
+      await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb });
+    } catch {}
   } else {
     await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
   }
@@ -412,10 +517,9 @@ async function showCart(ctx: MyContext) {
 
 bot.callbackQuery("menu_cart", async (ctx) => {
   await ctx.answerCallbackQuery();
-  await showCart(ctx);
+  await renderCartView(ctx);
 });
 
-// Изменение количества в корзине
 bot.callbackQuery(/^cart_incr_(\d+)$/, async (ctx) => {
   const userId = ctx.from?.id;
   if (!userId) return;
@@ -426,7 +530,7 @@ bot.callbackQuery(/^cart_incr_(\d+)$/, async (ctx) => {
     return;
   }
   await ctx.answerCallbackQuery();
-  await redrawCart(ctx);
+  await renderCartView(ctx);
 });
 
 bot.callbackQuery(/^cart_decr_(\d+)$/, async (ctx) => {
@@ -444,7 +548,7 @@ bot.callbackQuery(/^cart_decr_(\d+)$/, async (ctx) => {
     }
   }
   await ctx.answerCallbackQuery();
-  await redrawCart(ctx);
+  await renderCartView(ctx);
 });
 
 bot.callbackQuery(/^cart_del_(\d+)$/, async (ctx) => {
@@ -452,8 +556,8 @@ bot.callbackQuery(/^cart_del_(\d+)$/, async (ctx) => {
   if (!userId) return;
   const productId = parseInt(ctx.match[1], 10);
   dbService.removeFromCart(userId, productId);
-  await ctx.answerCallbackQuery({ text: "Товар удален из корзины" });
-  await redrawCart(ctx);
+  await ctx.answerCallbackQuery({ text: "Позиция удалена" });
+  await renderCartView(ctx);
 });
 
 bot.callbackQuery("cart_clear", async (ctx) => {
@@ -461,250 +565,35 @@ bot.callbackQuery("cart_clear", async (ctx) => {
   if (!userId) return;
   dbService.clearCart(userId);
   await ctx.answerCallbackQuery({ text: "Корзина очищена" });
-  await redrawCart(ctx);
+  await renderCartView(ctx);
 });
 
 bot.callbackQuery("cart_qty_info", async (ctx) => {
   await ctx.answerCallbackQuery({ text: "Используйте ➖ и ➕ для изменения количества" });
 });
 
-async function redrawCart(ctx: MyContext) {
-  const userId = ctx.from?.id;
-  if (!userId) return;
-  const cart = dbService.getCart(userId);
-
-  if (cart.length === 0) {
-    const kb = new InlineKeyboard()
-      .text("🛍 Перейти в каталог", "menu_catalog")
-      .row()
-      .text("◀️ Главное меню", "menu_main");
-
-    try {
-      await ctx.editMessageText("🛒 **Ваша корзина пуста.**\n\nВыберите товары в каталоге, чтобы оформить заявку.", {
-        parse_mode: "Markdown",
-        reply_markup: kb
-      });
-    } catch {}
-    return;
-  }
-
-  let text = "🛒 **Ваша корзина:**\n\n";
-  let total = 0;
-  const kb = new InlineKeyboard();
-
-  cart.forEach((item) => {
-    const subtotal = item.quantity * item.price;
-    total += subtotal;
-    text += `• **${item.name}**\n  ${item.quantity} шт. × ${item.price} ₽ = **${subtotal} ₽** (на складе: ${item.stock} шт.)\n\n`;
-
-    kb.text(`➖`, `cart_decr_${item.product_id}`)
-      .text(`${item.quantity} шт.`, `cart_qty_info`)
-      .text(`➕`, `cart_incr_${item.product_id}`)
-      .text(`🗑`, `cart_del_${item.product_id}`)
-      .row();
-  });
-
-  text += `💰 **ИТОГО К ОПЛАТЕ:** **${total} ₽**`;
-
-  kb.text("✅ Оформить заявку", "cart_checkout").row();
-  kb.text("🗑 Очистить всю корзину", "cart_clear").row();
-  kb.text("🛍 Продолжить покупки", "menu_catalog").row();
-  kb.text("◀️ Главное меню", "menu_main");
-
-  try {
-    await ctx.editMessageText(text, {
-      parse_mode: "Markdown",
-      reply_markup: kb
-    });
-  } catch {}
-}
-
-// Запуск оформления заказа
 bot.callbackQuery("cart_checkout", async (ctx) => {
   await ctx.answerCallbackQuery();
   await ctx.conversation.enter("checkoutConversation");
 });
 
-// ======================= АДМИН-ПАНЕЛЬ =======================
-
-bot.callbackQuery("admin_main", async (ctx) => {
-  await ctx.answerCallbackQuery();
-  if (!isAdmin(ctx)) {
-    await ctx.editMessageText("Доступ запрещен. Укажите свой ID через команду /claim_admin.");
-    return;
-  }
-  await showAdminPanel(ctx);
-});
-
-bot.callbackQuery("admin_add_cat", async (ctx) => {
-  await ctx.answerCallbackQuery();
-  if (!isAdmin(ctx)) return;
-  await ctx.conversation.enter("addCategoryConversation");
-});
-
-bot.callbackQuery("admin_del_cat", async (ctx) => {
-  await ctx.answerCallbackQuery();
-  if (!isAdmin(ctx)) return;
-  const categories = dbService.getCategories();
-  if (categories.length === 0) {
-    await ctx.editMessageText("Категорий пока нет.", {
-      reply_markup: new InlineKeyboard().text("◀️ В админку", "admin_main")
-    });
-    return;
-  }
-
-  const kb = new InlineKeyboard();
-  categories.forEach((cat) => {
-    kb.text(`🗑 ${cat.name}`, `admin_confirm_del_cat_${cat.id}`).row();
-  });
-  kb.text("◀️ В админку", "admin_main");
-
-  await ctx.editMessageText("⚠️ Выберите категорию для удаления (все товары внутри также удалятся):", {
-    reply_markup: kb
-  });
-});
-
-bot.callbackQuery(/^admin_confirm_del_cat_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  if (!isAdmin(ctx)) return;
-  const catId = parseInt(ctx.match[1], 10);
-  dbService.deleteCategory(catId);
-  await ctx.editMessageText("✅ Категория удалена.", {
-    reply_markup: new InlineKeyboard().text("◀️ В админку", "admin_main")
-  });
-});
-
-bot.callbackQuery("admin_add_prod", async (ctx) => {
-  await ctx.answerCallbackQuery();
-  if (!isAdmin(ctx)) return;
-  await ctx.conversation.enter("addProductConversation");
-});
-
-bot.callbackQuery("admin_cancel", async (ctx) => {
-  await ctx.answerCallbackQuery();
-  await ctx.editMessageText("Действие отменено.", {
-    reply_markup: new InlineKeyboard().text("◀️ В админку", "admin_main")
-  });
-});
-
-// Просмотр всех товаров для редактирования остатка, цены или удаления
-bot.callbackQuery("admin_products_list", async (ctx) => {
-  await ctx.answerCallbackQuery();
-  if (!isAdmin(ctx)) return;
-
-  const categories = dbService.getCategories();
-  if (categories.length === 0) {
-    await ctx.editMessageText("Категорий и товаров пока нет.", {
-      reply_markup: new InlineKeyboard().text("◀️ В админку", "admin_main")
-    });
-    return;
-  }
-
-  let text = "📦 **Управление складом и товарами:**\nВыберите категорию для редактирования товаров:";
-  const kb = new InlineKeyboard();
-
-  categories.forEach((cat) => {
-    kb.text(cat.name, `admin_cat_prods_${cat.id}`).row();
-  });
-  kb.text("◀️ В админку", "admin_main");
-
-  await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb });
-});
-
-bot.callbackQuery(/^admin_cat_prods_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  if (!isAdmin(ctx)) return;
-
-  const catId = parseInt(ctx.match[1], 10);
-  const cat = dbService.getCategoryById(catId);
-  const products = dbService.getProductsByCategory(catId);
-
-  const kb = new InlineKeyboard();
-  if (products.length === 0) {
-    kb.text("◀️ Назад", "admin_products_list");
-    await ctx.editMessageText(`В категории "${cat?.name}" нет товаров.`, { reply_markup: kb });
-    return;
-  }
-
-  products.forEach((p) => {
-    kb.text(`${p.name} | ${p.stock} шт. | ${p.price} ₽`, `admin_manage_prod_${p.id}`).row();
-  });
-  kb.text("◀️ Назад к категориям", "admin_products_list");
-
-  await ctx.editMessageText(`Товары в категории **${cat?.name}**:\n(Нажмите на товар для изменения остатка/цены/удаления)`, {
-    parse_mode: "Markdown",
-    reply_markup: kb
-  });
-});
-
-// Меню управления конкретным товаром
-bot.callbackQuery(/^admin_manage_prod_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  if (!isAdmin(ctx)) return;
-
-  const prodId = parseInt(ctx.match[1], 10);
-  const prod = dbService.getProductById(prodId);
-  if (!prod) {
-    await ctx.editMessageText("Товар не найден.", {
-      reply_markup: new InlineKeyboard().text("◀️ Назад", "admin_products_list")
-    });
-    return;
-  }
-
-  const kb = new InlineKeyboard()
-    .text("📦 Изменить остаток на складе", `edit_stock_${prod.id}`).row()
-    .text("💰 Изменить цену", `edit_price_${prod.id}`).row()
-    .text("❌ Удалить товар", `admin_del_prod_${prod.id}`).row()
-    .text("◀️ Назад к списку", `admin_cat_prods_${prod.category_id}`);
-
-  const msg = `📦 **${prod.name}**\n\n💰 Цена: **${prod.price} ₽**\n📊 Остаток на складе: **${prod.stock} шт.**\n${prod.description ? `📝 Описание: ${prod.description}\n` : ""}\nВыберите действие:`;
-
-  await ctx.editMessageText(msg, { parse_mode: "Markdown", reply_markup: kb });
-});
-
-bot.callbackQuery(/^edit_stock_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  if (!isAdmin(ctx)) return;
-  await ctx.conversation.enter("updateStockConversation");
-});
-
-bot.callbackQuery(/^edit_price_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  if (!isAdmin(ctx)) return;
-  await ctx.conversation.enter("updatePriceConversation");
-});
-
-bot.callbackQuery(/^admin_del_prod_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  if (!isAdmin(ctx)) return;
-  const prodId = parseInt(ctx.match[1], 10);
-  const prod = dbService.getProductById(prodId);
-  if (prod) {
-    dbService.deleteProduct(prodId);
-    await ctx.editMessageText(`✅ Товар **"${prod.name}"** удален.`, {
-      parse_mode: "Markdown",
-      reply_markup: new InlineKeyboard().text("◀️ К списку категорий", "admin_products_list")
-    });
-  }
-});
-
 // Обработка ошибок
 bot.catch((err) => {
-  console.error("Ошибка в боте:", err);
+  console.error("Ошибка бота:", err);
 });
 
-// Легковесный HTTP healthcheck сервер для хостингов (Render, Railway, Fly.io)
+// HTTP сервер для healthcheck
 const PORT = process.env.PORT || 3000;
 const server = http.createServer((_req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
   res.end("Bot is running!");
 });
 server.listen(PORT, () => {
-  console.log(`Healthcheck HTTP сервер слушает порт ${PORT}`);
+  console.log(`HTTP сервер на порту ${PORT}`);
 });
 
-// Запуск бота
-console.log("Бот запускается...");
+// Старт бота
+console.log("Запуск @LVoptBot...");
 bot.start({
   onStart: (info) => {
     console.log(`Бот @${info.username} успешно запущен!`);

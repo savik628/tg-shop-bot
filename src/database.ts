@@ -17,7 +17,8 @@ db.exec(`
 
   CREATE TABLE IF NOT EXISTS categories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
+    parent_id INTEGER DEFAULT NULL REFERENCES categories(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -50,8 +51,14 @@ db.exec(`
   );
 `);
 
+// Миграция parent_id на случай, если таблица была создана ранее без него
+try {
+  db.exec("ALTER TABLE categories ADD COLUMN parent_id INTEGER DEFAULT NULL REFERENCES categories(id) ON DELETE CASCADE");
+} catch {}
+
 export interface Category {
   id: number;
+  parent_id: number | null;
   name: string;
 }
 
@@ -103,22 +110,58 @@ export const dbService = {
   },
 
   // Категории
-  getCategories(): Category[] {
-    return db.prepare("SELECT * FROM categories ORDER BY name ASC").all() as Category[];
+  getCategories(parentId: number | null = null): Category[] {
+    if (parentId === null) {
+      return db.prepare("SELECT * FROM categories WHERE parent_id IS NULL ORDER BY name ASC").all() as Category[];
+    }
+    return db.prepare("SELECT * FROM categories WHERE parent_id = ? ORDER BY name ASC").all(parentId) as Category[];
   },
 
   getCategoryById(id: number): Category | undefined {
     return db.prepare("SELECT * FROM categories WHERE id = ?").get(id) as Category | undefined;
   },
 
-  addCategory(name: string): number {
-    const stmt = db.prepare("INSERT INTO categories (name) VALUES (?)");
-    const info = stmt.run(name.trim());
+  // Получить цепочку навигации (хлебные крошки: [Главная, Подкатегория, ...])
+  getCategoryBreadcrumbs(categoryId: number): Category[] {
+    const crumbs: Category[] = [];
+    let currentId: number | null = categoryId;
+
+    while (currentId !== null) {
+      const cat = this.getCategoryById(currentId);
+      if (!cat) break;
+      crumbs.unshift(cat);
+      currentId = cat.parent_id;
+    }
+
+    return crumbs;
+  },
+
+  getCategoryPathString(categoryId: number): string {
+    const crumbs = this.getCategoryBreadcrumbs(categoryId);
+    return crumbs.map(c => c.name).join(" ➔ ");
+  },
+
+  addCategory(name: string, parentId: number | null = null): number {
+    const stmt = db.prepare("INSERT INTO categories (name, parent_id) VALUES (?, ?)");
+    const info = stmt.run(name.trim(), parentId);
     return Number(info.lastInsertRowid);
   },
 
   deleteCategory(id: number): void {
-    db.prepare("DELETE FROM categories WHERE id = ?").run(id);
+    // Каскадное удаление подкатегорий и товаров
+    const deleteRecursively = (catId: number) => {
+      const children = db.prepare("SELECT id FROM categories WHERE parent_id = ?").all(catId) as { id: number }[];
+      for (const child of children) {
+        deleteRecursively(child.id);
+      }
+      db.prepare("DELETE FROM products WHERE category_id = ?").run(catId);
+      db.prepare("DELETE FROM categories WHERE id = ?").run(catId);
+    };
+
+    const tx = db.transaction(() => {
+      deleteRecursively(id);
+    });
+    tx();
   },
 
   // Товары
@@ -137,6 +180,28 @@ export const dbService = {
     `);
     const info = stmt.run(categoryId, name.trim(), description.trim(), price, stock);
     return Number(info.lastInsertRowid);
+  },
+
+  // Пакетное добавление товаров
+  addBatchProducts(
+    categoryId: number,
+    items: Array<{ name: string; price: number; stock: number; description?: string }>
+  ): number {
+    const insertStmt = db.prepare(`
+      INSERT INTO products (category_id, name, description, price, stock)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+
+    const tx = db.transaction(() => {
+      let count = 0;
+      for (const item of items) {
+        insertStmt.run(categoryId, item.name.trim(), (item.description || "").trim(), item.price, item.stock);
+        count++;
+      }
+      return count;
+    });
+
+    return tx();
   },
 
   updateProductStock(id: number, stock: number): void {

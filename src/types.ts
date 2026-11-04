@@ -2,6 +2,7 @@ import { Context, SessionFlavor } from "grammy";
 import { ConversationFlavor, Conversation } from "@grammyjs/conversations";
 
 export interface SessionData {
+  targetCategoryId?: number | null;
   adminProductDraft?: {
     categoryId?: number;
     name?: string;
