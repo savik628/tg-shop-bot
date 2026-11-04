@@ -1,8 +1,8 @@
 import { MyConversation, MyContext } from "./types.js";
 import { dbService } from "./database.js";
-import { InlineKeyboard, Keyboard } from "grammy";
+import { Keyboard } from "grammy";
 
-// Утилита безопасного удаления списка сообщений
+// Утилита очистки временных сообщений
 async function cleanupMessages(ctx: MyContext, ids: number[]) {
   if (!ctx.chat?.id) return;
   for (const id of ids) {
@@ -94,10 +94,8 @@ export async function checkoutConversation(conversation: MyConversation, ctx: My
     comment = commentResponse.message.text.trim();
   }
 
-  // Удаляем все служебные сообщения ввода
   await cleanupMessages(ctx, toClean);
 
-  // Оформление в БД со списанием остатков
   const userName = [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(" ") || "Покупатель";
   const userTag = ctx.from?.username ? `@${ctx.from.username}` : "нет юзернейма";
 
@@ -110,7 +108,6 @@ export async function checkoutConversation(conversation: MyConversation, ctx: My
     return;
   }
 
-  // Сообщение покупателю
   let userSummary = `✅ **Ваша заявка #${result.orderId} успешно принята!**\n\n`;
   userSummary += `📦 **Состав заказа:**\n`;
   for (const item of result.items) {
@@ -119,14 +116,13 @@ export async function checkoutConversation(conversation: MyConversation, ctx: My
   userSummary += `\n💰 **Итого к оплате:** ${result.total} ₽\n`;
   userSummary += `📞 **Контакт:** ${phone}\n`;
   userSummary += `💬 **Комментарий:** ${comment}\n\n`;
-  userSummary += `Владелец получил заявку и свяжется с вами!`;
+  userSummary += `Владелец склада получил заявку и свяжется с вами!`;
 
   await ctx.reply(userSummary, {
     parse_mode: "Markdown",
     reply_markup: { remove_keyboard: true }
   });
 
-  // Уведомление владельцу
   const adminId = dbService.getAdminId();
   if (adminId && adminId > 0) {
     let adminMsg = `🔔 **НОВАЯ ЗАЯВКА #${result.orderId}**\n\n`;
@@ -148,18 +144,20 @@ export async function checkoutConversation(conversation: MyConversation, ctx: My
   }
 }
 
-// ======================== ДОБАВЛЕНИЕ КАТЕГОРИИ ========================
+// ======================== СОЗДАНИЕ ПАПОК (ОДНОЙ ИЛИ НЕСКОЛЬКИХ ПОДРЯД) ========================
 export async function addCategoryConversation(conversation: MyConversation, ctx: MyContext) {
   const toClean: number[] = [];
   const parentId = (ctx as any).session?.targetCategoryId ?? null;
 
-  let prompt = "🏷 Введите название новой корневой категории:";
-  if (parentId) {
-    const parent = dbService.getCategoryById(parentId);
-    prompt = `🏷 Введите название новой **подкатегории** для **"${parent?.name}"**:`;
-  }
+  const currentPath = dbService.getCategoryPathString(parentId);
+  const helpText = `📁 **Создание папок (категорий)**\n` +
+    `📍 Расположение: **${currentPath}**\n\n` +
+    `Введите название папки или **несколько названий подряд** через запятую или с новой строки:\n\n` +
+    `_Пример:_\n` +
+    `\`Футболки, Рубашки, Худи, Джинсы\`\n\n` +
+    `_Или отправьте /cancel для отмены:_`;
 
-  const q = await ctx.reply(`${prompt}\n\n(Отправьте /cancel для отмены)`, { parse_mode: "Markdown" });
+  const q = await ctx.reply(helpText, { parse_mode: "Markdown" });
   toClean.push(q.message_id);
 
   const response = await conversation.wait();
@@ -169,41 +167,82 @@ export async function addCategoryConversation(conversation: MyConversation, ctx:
   await cleanupMessages(ctx, toClean);
 
   if (!text || text === "/cancel") {
-    const m = await ctx.reply("Действие отменено.");
+    const m = await ctx.reply("Создание папок отменено.");
     setTimeout(() => ctx.api.deleteMessage(ctx.chat!.id, m.message_id).catch(() => {}), 3000);
     return;
   }
 
-  try {
-    dbService.addCategory(text, parentId);
-    const m = await ctx.reply(`✅ Категория **"${text}"** успешно создана!`, { parse_mode: "Markdown" });
-    setTimeout(() => ctx.api.deleteMessage(ctx.chat!.id, m.message_id).catch(() => {}), 4000);
-  } catch (err: any) {
-    await ctx.reply(`❌ Ошибка добавления категории: ${err.message}`);
+  // Разбиваем по запятым или переводам строк
+  const names = text
+    .split(/[\n,]/)
+    .map(n => n.trim())
+    .filter(n => n.length > 0);
+
+  if (names.length === 0) {
+    const m = await ctx.reply("❌ Не указано ни одного корректного названия.");
+    setTimeout(() => ctx.api.deleteMessage(ctx.chat!.id, m.message_id).catch(() => {}), 3000);
+    return;
   }
+
+  const createdCount = dbService.addCategoriesBatch(names, parentId);
+  const m = await ctx.reply(
+    `✅ Создано папок: **${createdCount} шт.**\n${names.map(n => `└ 📁 ${n}`).join("\n")}`,
+    { parse_mode: "Markdown" }
+  );
+  setTimeout(() => ctx.api.deleteMessage(ctx.chat!.id, m.message_id).catch(() => {}), 4000);
+}
+
+// ======================== ПЕРЕИМЕНОВАНИЕ ПАПКИ ========================
+export async function renameCategoryConversation(conversation: MyConversation, ctx: MyContext) {
+  const toClean: number[] = [];
+  const categoryId = (ctx as any).session?.targetCategoryId;
+  if (!categoryId) return;
+
+  const cat = dbService.getCategoryById(categoryId);
+  if (!cat) return;
+
+  const q = await ctx.reply(`✏️ Введите новое название для папки **"${cat.name}"** (или /cancel):`, {
+    parse_mode: "Markdown"
+  });
+  toClean.push(q.message_id);
+
+  const response = await conversation.wait();
+  if (response.message?.message_id) toClean.push(response.message.message_id);
+  const text = response.message?.text?.trim();
+
+  await cleanupMessages(ctx, toClean);
+
+  if (!text || text === "/cancel") {
+    const m = await ctx.reply("Переименование отменено.");
+    setTimeout(() => ctx.api.deleteMessage(ctx.chat!.id, m.message_id).catch(() => {}), 3000);
+    return;
+  }
+
+  dbService.renameCategory(categoryId, text);
+  const m = await ctx.reply(`✅ Папка переименована в **"${text}"**!`, { parse_mode: "Markdown" });
+  setTimeout(() => ctx.api.deleteMessage(ctx.chat!.id, m.message_id).catch(() => {}), 3000);
 }
 
 // ======================== МАССОВОЕ ДОБАВЛЕНИЕ ТОВАРОВ СПИСКОМ ========================
 export async function addBatchProductsConversation(conversation: MyConversation, ctx: MyContext) {
   const categoryId = (ctx as any).session?.targetCategoryId;
   if (!categoryId) {
-    await ctx.reply("❌ Категория не выбрана.");
+    await ctx.reply("❌ Папка не выбрана.");
     return;
   }
 
-  const category = dbService.getCategoryById(categoryId);
   const pathStr = dbService.getCategoryPathString(categoryId);
   const toClean: number[] = [];
 
   const helpText = `⚡️ **Массовое добавление товаров**\n` +
-    `📂 Категория: **${pathStr}**\n\n` +
+    `📍 Папка: **${pathStr}**\n\n` +
     `Отправьте список товаров одним сообщением в формате:\n` +
     `\`Название - Цена - Количество\`\n\n` +
     `_Пример:_\n` +
     `\`Футболка белая - 1200 - 20\`\n` +
     `\`Футболка черная - 1200 - 15\`\n` +
     `\`Худи оверсайз - 3500 - 8\`\n` +
-    `\`Кепка - 800\` _(если количество не указано, будет 10 шт.)_\n\n` +
+    `\`Кепка Classic - 800\` _(по умолчанию 10 шт.)_\n\n` +
     `Или отправьте /cancel для отмены:`;
 
   const q = await ctx.reply(helpText, { parse_mode: "Markdown" });
@@ -216,7 +255,7 @@ export async function addBatchProductsConversation(conversation: MyConversation,
   await cleanupMessages(ctx, toClean);
 
   if (!text || text === "/cancel") {
-    const m = await ctx.reply("Массовое добавление отменено.");
+    const m = await ctx.reply("Добавление товаров отменено.");
     setTimeout(() => ctx.api.deleteMessage(ctx.chat!.id, m.message_id).catch(() => {}), 3000);
     return;
   }
@@ -225,7 +264,6 @@ export async function addBatchProductsConversation(conversation: MyConversation,
   const itemsToAdd: Array<{ name: string; price: number; stock: number }> = [];
 
   for (const line of lines) {
-    // Поддерживаем разделители: -, |, ;, /
     const parts = line.split(/[-|;/]/).map(p => p.trim());
     if (parts.length >= 2) {
       const name = parts[0];
@@ -243,35 +281,34 @@ export async function addBatchProductsConversation(conversation: MyConversation,
   }
 
   if (itemsToAdd.length === 0) {
-    const m = await ctx.reply("❌ Не удалось распознать ни одного товара. Проверьте формат и попробуйте снова.");
+    const m = await ctx.reply("❌ Не удалось распознать формат товаров. Проверьте правильность и попробуйте снова.");
     setTimeout(() => ctx.api.deleteMessage(ctx.chat!.id, m.message_id).catch(() => {}), 4000);
     return;
   }
 
   const addedCount = dbService.addBatchProducts(categoryId, itemsToAdd);
-  const resultMsg = `🎉 **Успешно добавлено товаров: ${addedCount} шт.!**\n\n` +
+  const resultMsg = `🎉 **В папку добавлено товаров: ${addedCount} шт.!**\n\n` +
     itemsToAdd.map(i => `• ${i.name} — ${i.price} ₽ (${i.stock} шт.)`).slice(0, 15).join("\n") +
     (itemsToAdd.length > 15 ? `\n...и ещё ${itemsToAdd.length - 15} поз.` : "");
 
   const m = await ctx.reply(resultMsg, { parse_mode: "Markdown" });
-  setTimeout(() => ctx.api.deleteMessage(ctx.chat!.id, m.message_id).catch(() => {}), 7000);
+  setTimeout(() => ctx.api.deleteMessage(ctx.chat!.id, m.message_id).catch(() => {}), 6000);
 }
 
 // ======================== ОДИНОЧНОЕ ДОБАВЛЕНИЕ ТОВАРА ========================
 export async function addSingleProductConversation(conversation: MyConversation, ctx: MyContext) {
   const categoryId = (ctx as any).session?.targetCategoryId;
   if (!categoryId) {
-    await ctx.reply("❌ Категория не выбрана.");
+    await ctx.reply("❌ Папка не выбрана.");
     return;
   }
 
-  const category = dbService.getCategoryById(categoryId);
   const pathStr = dbService.getCategoryPathString(categoryId);
   const toClean: number[] = [];
 
   // 1. Название
   const q1 = await ctx.reply(
-    `📂 Категория: **${pathStr}**\n\nВведите **название товара** (или /cancel):`,
+    `📍 Папка: **${pathStr}**\n\nВведите **название товара** (или /cancel):`,
     { parse_mode: "Markdown" }
   );
   toClean.push(q1.message_id);
@@ -302,7 +339,7 @@ export async function addSingleProductConversation(conversation: MyConversation,
   const description = descMsg.message?.text === "⏩ Без описания" ? "" : (descMsg.message?.text?.trim() || "");
 
   // 3. Цена
-  const q3 = await ctx.reply("Укажите **цену в рублях** (число, например `1200`):", {
+  const q3 = await ctx.reply("Укажите **цену в рублях** (например `1500`):", {
     parse_mode: "Markdown",
     reply_markup: { remove_keyboard: true }
   });
@@ -321,12 +358,12 @@ export async function addSingleProductConversation(conversation: MyConversation,
       price = val;
       break;
     }
-    const errM = await ctx.reply("Введите корректное положительное число для цены:");
+    const errM = await ctx.reply("Введите корректное число для цены:");
     toClean.push(errM.message_id);
   }
 
-  // 4. Количество
-  const q4 = await ctx.reply("Укажите **начальное количество на складе** (например `20`):", {
+  // 4. Количество на складе
+  const q4 = await ctx.reply("Укажите **начальный остаток на складе** (например `20`):", {
     parse_mode: "Markdown"
   });
   toClean.push(q4.message_id);

@@ -4,7 +4,6 @@ import path from "node:path";
 const dbPath = path.resolve(process.cwd(), "shop.db");
 export const db = new Database(dbPath);
 
-// Включаем WAL режим для быстрой и надежной работы
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
 
@@ -51,7 +50,6 @@ db.exec(`
   );
 `);
 
-// Миграция parent_id на случай, если таблица была создана ранее без него
 try {
   db.exec("ALTER TABLE categories ADD COLUMN parent_id INTEGER DEFAULT NULL REFERENCES categories(id) ON DELETE CASCADE");
 } catch {}
@@ -60,6 +58,11 @@ export interface Category {
   id: number;
   parent_id: number | null;
   name: string;
+}
+
+export interface CategoryWithStats extends Category {
+  subfolders_count: number;
+  products_count: number;
 }
 
 export interface Product {
@@ -109,19 +112,25 @@ export const dbService = {
     `).run(id.toString());
   },
 
-  // Категории
-  getCategories(parentId: number | null = null): Category[] {
-    if (parentId === null) {
-      return db.prepare("SELECT * FROM categories WHERE parent_id IS NULL ORDER BY name ASC").all() as Category[];
-    }
-    return db.prepare("SELECT * FROM categories WHERE parent_id = ? ORDER BY name ASC").all(parentId) as Category[];
+  // Папки (Категории) со счётчиками в стиле «Мой Склад»
+  getCategoriesWithStats(parentId: number | null = null): CategoryWithStats[] {
+    const query = `
+      SELECT c.*,
+        (SELECT COUNT(*) FROM categories sc WHERE sc.parent_id = c.id) as subfolders_count,
+        (SELECT COUNT(*) FROM products p WHERE p.category_id = c.id) as products_count
+      FROM categories c
+      WHERE ${parentId === null ? "c.parent_id IS NULL" : "c.parent_id = ?"}
+      ORDER BY c.name ASC
+    `;
+    const stmt = db.prepare(query);
+    return (parentId === null ? stmt.all() : stmt.all(parentId)) as CategoryWithStats[];
   },
 
   getCategoryById(id: number): Category | undefined {
     return db.prepare("SELECT * FROM categories WHERE id = ?").get(id) as Category | undefined;
   },
 
-  // Получить цепочку навигации (хлебные крошки: [Главная, Подкатегория, ...])
+  // Хлебные крошки (путь к текущей папке)
   getCategoryBreadcrumbs(categoryId: number): Category[] {
     const crumbs: Category[] = [];
     let currentId: number | null = categoryId;
@@ -136,19 +145,41 @@ export const dbService = {
     return crumbs;
   },
 
-  getCategoryPathString(categoryId: number): string {
+  getCategoryPathString(categoryId: number | null): string {
+    if (categoryId === null) return "📁 Мой Склад";
     const crumbs = this.getCategoryBreadcrumbs(categoryId);
-    return crumbs.map(c => c.name).join(" ➔ ");
+    return "📁 Мой Склад / " + crumbs.map(c => c.name).join(" / ");
   },
 
+  // Создание одной папки
   addCategory(name: string, parentId: number | null = null): number {
     const stmt = db.prepare("INSERT INTO categories (name, parent_id) VALUES (?, ?)");
     const info = stmt.run(name.trim(), parentId);
     return Number(info.lastInsertRowid);
   },
 
+  // Массовое создание папок в текущей директории
+  addCategoriesBatch(names: string[], parentId: number | null = null): number {
+    const stmt = db.prepare("INSERT INTO categories (name, parent_id) VALUES (?, ?)");
+    const tx = db.transaction(() => {
+      let count = 0;
+      for (const rawName of names) {
+        const name = rawName.trim();
+        if (name.length > 0) {
+          stmt.run(name, parentId);
+          count++;
+        }
+      }
+      return count;
+    });
+    return tx();
+  },
+
+  renameCategory(id: number, newName: string): void {
+    db.prepare("UPDATE categories SET name = ? WHERE id = ?").run(newName.trim(), id);
+  },
+
   deleteCategory(id: number): void {
-    // Каскадное удаление подкатегорий и товаров
     const deleteRecursively = (catId: number) => {
       const children = db.prepare("SELECT id FROM categories WHERE parent_id = ?").all(catId) as { id: number }[];
       for (const child of children) {
@@ -182,7 +213,7 @@ export const dbService = {
     return Number(info.lastInsertRowid);
   },
 
-  // Пакетное добавление товаров
+  // Пакетное добавление товаров списком
   addBatchProducts(
     categoryId: number,
     items: Array<{ name: string; price: number; stock: number; description?: string }>
@@ -293,7 +324,6 @@ export const dbService = {
           throw new Error(`Недостаточно товара "${prod.name}" на складе (осталось: ${prod.stock} шт.)`);
         }
 
-        // Списываем остаток
         db.prepare("UPDATE products SET stock = stock - ? WHERE id = ?").run(item.quantity, item.product_id);
 
         const subtotal = item.quantity * prod.price;
@@ -307,14 +337,12 @@ export const dbService = {
         });
       }
 
-      // Сохраняем в таблицу orders
       const orderStmt = db.prepare(`
         INSERT INTO orders (user_id, user_name, phone, comment, total_price, items_json)
         VALUES (?, ?, ?, ?, ?, ?)
       `);
       const info = orderStmt.run(userId, userName, phone, comment, total, JSON.stringify(orderItems));
 
-      // Очищаем корзину
       this.clearCart(userId);
 
       return { orderId: Number(info.lastInsertRowid), total, items: orderItems };
