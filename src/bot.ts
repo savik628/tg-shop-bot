@@ -39,7 +39,7 @@ function isAdmin(ctx: MyContext): boolean {
 // Постоянная нижняя клавиатура
 function getBottomKeyboard(ctx: MyContext): Keyboard {
   const kb = new Keyboard()
-    .text("📁 Мой Склад")
+    .text("📁 Склад")
     .text("🛒 Корзина")
     .row();
 
@@ -60,7 +60,7 @@ async function deleteUserMessage(ctx: MyContext) {
 
 function getMainMenu(ctx: MyContext): InlineKeyboard {
   const kb = new InlineKeyboard()
-    .text("📁 Открыть Мой Склад", "cat_nav_root")
+    .text("📁 Открыть Склад", "cat_nav_root")
     .row()
     .text("🛒 Корзина заказов", "menu_cart")
     .row();
@@ -83,7 +83,7 @@ async function showAdminPanel(ctx: MyContext) {
     `_Для добавления товаров и папок перейдите в склад._`;
 
   const kb = new InlineKeyboard()
-    .text("📁 Открыть Мой Склад", "cat_nav_root").row()
+    .text("📁 Открыть Склад", "cat_nav_root").row()
     .text("📁 + Создать корневые папки", "admin_create_root_cat").row()
     .text("🔄 Обновить", "admin_refresh").row()
     .text("◀️ В меню", "menu_main");
@@ -176,7 +176,7 @@ bot.command("id", async (ctx) => {
 
 // ======================== ОБРАБОТЧИКИ НИЖНИХ КНОПОК ========================
 
-bot.hears(["📁 Мой Склад", "🛍 Каталог"], async (ctx) => {
+bot.hears(["📁 Склад", "📁 Мой Склад", "🛍 Каталог"], async (ctx) => {
   await deleteUserMessage(ctx);
   await renderWarehouseView(ctx, null);
 });
@@ -456,7 +456,7 @@ async function renderCartView(ctx: MyContext) {
 
   if (cart.length === 0) {
     const kb = new InlineKeyboard()
-      .text("📁 Открыть Мой Склад", "cat_nav_root")
+      .text("📁 Открыть Склад", "cat_nav_root")
       .row()
       .text("◀️ В меню", "menu_main");
 

@@ -214,9 +214,9 @@ export const dbService = {
   },
 
   getCategoryPathString(categoryId: number | null): string {
-    if (categoryId === null) return "📁 Мой Склад";
+    if (categoryId === null) return "📁 Склад";
     const crumbs = this.getCategoryBreadcrumbs(categoryId);
-    return "📁 Мой Склад / " + crumbs.map(c => c.name).join(" / ");
+    return "📁 Склад / " + crumbs.map(c => c.name).join(" / ");
   },
 
   // Создание одной папки

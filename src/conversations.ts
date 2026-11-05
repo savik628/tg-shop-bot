@@ -215,7 +215,7 @@ export async function addSingleProductConversation(conversation: MyConversation,
 
   if (!categoryId) {
     await ctx.reply("❌ Сначала откройте папку, в которую хотите добавить товары (например: «Табак ➔ Мастхэв»), и нажмите кнопку «📦 + Товар».", {
-      reply_markup: new InlineKeyboard().text("📁 Открыть Мой Склад", "cat_nav_root")
+      reply_markup: new InlineKeyboard().text("📁 Открыть Склад", "cat_nav_root")
     });
     return;
   }
