@@ -8,7 +8,8 @@ import { activeCategoryMap } from "./state.js";
 import {
   checkoutConversation,
   addCategoryConversation,
-  addSingleProductConversation
+  addSingleProductConversation,
+  updateStockConversation
 } from "./conversations.js";
 
 dotenv.config();
@@ -27,6 +28,7 @@ bot.use(conversations());
 bot.use(createConversation(checkoutConversation));
 bot.use(createConversation(addCategoryConversation));
 bot.use(createConversation(addSingleProductConversation));
+bot.use(createConversation(updateStockConversation));
 
 // Проверка на админа
 function isAdmin(ctx: MyContext): boolean {
@@ -384,6 +386,7 @@ bot.callbackQuery(/^prod_(\d+)$/, async (ctx) => {
   }
 
   if (isAdmin(ctx)) {
+    kb.text("✏️ Изменить остаток", `edit_stock_${product.id}`).row();
     kb.text("🗑 Удалить этот товар", `admin_del_prod_${product.id}`).row();
   }
 
@@ -428,6 +431,12 @@ bot.callbackQuery(/^cart_add_(\d+)$/, async (ctx) => {
       await ctx.editMessageReplyMarkup({ reply_markup: kb });
     } catch {}
   }
+});
+
+bot.callbackQuery(/^edit_stock_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isAdmin(ctx)) return;
+  await ctx.conversation.enter("updateStockConversation");
 });
 
 // Удаление товара в 1 клик

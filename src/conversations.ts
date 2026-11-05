@@ -98,7 +98,9 @@ export async function checkoutConversation(conversation: MyConversation, ctx: My
   const userName = [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(" ") || "Покупатель";
   const userTag = ctx.from?.username ? `@${ctx.from.username}` : "нет юзернейма";
 
-  const result = dbService.checkoutOrder(userId, `${userName} (${userTag})`, phone, comment);
+  const result = await conversation.external(() =>
+    dbService.checkoutOrder(userId, `${userName} (${userTag})`, phone, comment)
+  );
 
   if (!result.success || !result.items) {
     await ctx.reply(`❌ Не удалось оформить заявку: ${result.error}`, {
@@ -187,7 +189,7 @@ export async function addCategoryConversation(conversation: MyConversation, ctx:
       .filter(n => n.length > 0);
 
     if (names.length > 0) {
-      dbService.addCategoriesBatch(names, parentId);
+      await conversation.external(() => dbService.addCategoriesBatch(names, parentId));
       const ack = await ctx.reply(
         `✅ Создано: ${names.map(n => `📁 **${n}**`).join(", ")}\n` +
         `📍 Внутри: _${currentPath}_\n\n` +
@@ -287,7 +289,9 @@ export async function addSingleProductConversation(conversation: MyConversation,
         }
 
         if (name && price >= 0 && stock >= 0) {
-          const res = dbService.addProduct(categoryId, name, "", price, stock);
+          const res = await conversation.external(() =>
+            dbService.addProduct(categoryId, name, "", price, stock)
+          );
           addedCount++;
           if (res.isUpdated) {
             addedNames.push(`🔄 **${res.name}** (остаток +${stock} ➔ всего **${res.totalStock} шт.**, цена: **${res.price} ₽**)`);
@@ -329,8 +333,37 @@ export async function renameCategoryConversation(conversation: MyConversation, c
   // Упрощено: не используется
 }
 
+// Быстрое изменение остатка товара
 export async function updateStockConversation(conversation: MyConversation, ctx: MyContext) {
-  // Упрощено: удаление и добавление
+  const match = ctx.callbackQuery?.data?.match(/^edit_stock_(\d+)$/);
+  const productId = match ? parseInt(match[1], 10) : 0;
+  const product = dbService.getProductById(productId);
+  if (!product) return;
+
+  const toClean: number[] = [];
+  const q = await ctx.reply(`📦 **${product.name}**\nТекущий остаток: **${product.stock} шт.**\n\nВведите **новое точное количество** (например \`70\`):`, {
+    parse_mode: "Markdown"
+  });
+  toClean.push(q.message_id);
+
+  while (true) {
+    const msg = await conversation.wait();
+    if (msg.message?.message_id) toClean.push(msg.message.message_id);
+    if (msg.message?.text === "/cancel") {
+      await cleanupMessages(ctx, toClean);
+      return;
+    }
+    const val = parseInt(msg.message?.text || "", 10);
+    if (!isNaN(val) && val >= 0) {
+      await conversation.external(() => dbService.updateProductStock(productId, val));
+      await cleanupMessages(ctx, toClean);
+      const m = await ctx.reply(`✅ Остаток **${product.name}** обновлён: **${val} шт.**`, { parse_mode: "Markdown" });
+      setTimeout(() => ctx.api.deleteMessage(ctx.chat!.id, m.message_id).catch(() => {}), 3000);
+      break;
+    }
+    const errM = await ctx.reply("Введите целое число:");
+    toClean.push(errM.message_id);
+  }
 }
 
 export async function updatePriceConversation(conversation: MyConversation, ctx: MyContext) {
