@@ -176,6 +176,10 @@ export const dbService = {
     `).run(id.toString());
   },
 
+  clearAdminId(): void {
+    db.prepare("DELETE FROM settings WHERE key = 'admin_id'").run();
+  },
+
   // Папки (Категории) со счётчиками в стиле «Мой Склад»
   getCategoriesWithStats(parentId: number | null = null): CategoryWithStats[] {
     const query = `

@@ -115,16 +115,12 @@ bot.command("admin", async (ctx) => {
   if (!uid) return;
 
   const currentAdmin = dbService.getAdminId();
-  if (!currentAdmin) {
-    const kb = new InlineKeyboard().text("👑 Назначить себя владельцем", "claim_admin_click");
-    await ctx.reply("⚠️ Владелец склада ещё не назначен!\nНажмите кнопку ниже, чтобы получить доступ:", {
+  if (!currentAdmin || currentAdmin !== uid) {
+    const kb = new InlineKeyboard().text("👑 Назначить меня владельцем бота", "claim_admin_click");
+    await ctx.reply(`⚙️ **Доступ к панели управления**\n\nТекущий владелец: \`${currentAdmin || "не назначен"}\`\nВаш ID: \`${uid}\`\n\nНажмите кнопку ниже, чтобы стать владельцем:`, {
+      parse_mode: "Markdown",
       reply_markup: kb
     });
-    return;
-  }
-
-  if (currentAdmin !== uid) {
-    await ctx.reply("❌ Доступ в панель управления запрещен.");
     return;
   }
 
@@ -134,15 +130,11 @@ bot.command("admin", async (ctx) => {
 bot.callbackQuery("claim_admin_click", async (ctx) => {
   const uid = ctx.from?.id;
   if (!uid) return;
-  const currentAdmin = dbService.getAdminId();
-  if (currentAdmin && currentAdmin !== uid) {
-    await ctx.answerCallbackQuery({ text: "У бота уже есть владелец!", show_alert: true });
-    return;
-  }
+
   dbService.setAdminId(uid);
   await ctx.answerCallbackQuery({ text: "Вы назначены владельцем!" });
   await ctx.reply(
-    `🎉 **Вы назначены владельцем склада!**\n\n🆔 Ваш Telegram ID: \`${uid}\`\n\n💡 _Совет:_ чтобы статус админа сохранялся всегда при перезапусках Render, укажите в Render (Environment):\n\`ADMIN_ID=${uid}\``,
+    `🎉 **Владелец бота успешно обновлен!**\n\n🆔 Ваш Telegram ID: \`${uid}\`\nТеперь вам доступны все функции управления складом и кнопка «⚙️ Управление» внизу.\n\n💡 _Чтобы права никогда не сбрасывались при перезапуске Render, добавьте в Render (вкладка Environment):_\n\`ADMIN_ID=${uid}\``,
     {
       parse_mode: "Markdown",
       reply_markup: getBottomKeyboard(ctx)
@@ -155,20 +147,22 @@ bot.command("claim_admin", async (ctx) => {
   await deleteUserMessage(ctx);
   const uid = ctx.from?.id;
   if (!uid) return;
-  const currentAdmin = dbService.getAdminId();
-  if (currentAdmin && currentAdmin !== uid) {
-    await ctx.reply("❌ У этого бота уже назначен другой владелец.");
-    return;
-  }
+
   dbService.setAdminId(uid);
   await ctx.reply(
-    `🎉 **Вы назначены владельцем бота!**\n\n🆔 Ваш ID: \`${uid}\`\n\n💡 _Для постоянного сохранения на Render добавьте переменную:_\n\`ADMIN_ID=${uid}\``,
+    `🎉 **Владелец бота успешно обновлен!**\n\n🆔 Ваш ID: \`${uid}\`\nВам открыт полный доступ к управлению складом.\n\n💡 _Для постоянного сохранения на Render добавьте переменную:_\n\`ADMIN_ID=${uid}\``,
     {
       parse_mode: "Markdown",
       reply_markup: getBottomKeyboard(ctx)
     }
   );
   await showAdminPanel(ctx);
+});
+
+bot.command("reset_admin", async (ctx) => {
+  await deleteUserMessage(ctx);
+  dbService.clearAdminId();
+  await ctx.reply("🔄 Владелец сброшен! Теперь любой пользователь может назначить себя командой /claim_admin.");
 });
 
 bot.command("id", async (ctx) => {
