@@ -1401,6 +1401,8 @@ async function renderCartView(ctx: MyContext) {
     total += subtotal;
     text += `• **${md(item.name)}**\n  ${item.quantity} шт. × ${item.price} ₽ = **${subtotal} ₽**\n\n`;
 
+    const displayName = item.name.length > 40 ? item.name.slice(0, 38) + "…" : item.name;
+    kb.text(`📦 ${displayName}`, `cart_item_info_${item.product_id}`).row();
     kb.text(`➖`, `cart_decr_${item.product_id}`)
       .text(`${item.quantity} шт.`, `cart_qty_info`)
       .text(`➕`, `cart_incr_${item.product_id}`)
@@ -1477,6 +1479,18 @@ bot.callbackQuery("cart_clear", async (ctx) => {
   dbService.clearCart(userId);
   await ctx.answerCallbackQuery({ text: "Корзина очищена" });
   await renderCartView(ctx);
+});
+
+bot.callbackQuery(/^cart_item_info_(\d+)$/, async (ctx) => {
+  const prodId = parseInt(ctx.match[1], 10);
+  const prod = dbService.getProductById(prodId);
+  if (prod) {
+    await ctx.answerCallbackQuery({
+      text: `📦 ${prod.name}\n💰 ${prod.price} ₽ | В наличии: ${prod.stock} шт.`
+    });
+  } else {
+    await ctx.answerCallbackQuery();
+  }
 });
 
 bot.callbackQuery("cart_qty_info", async (ctx) => {
