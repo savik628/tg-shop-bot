@@ -1,4 +1,4 @@
-import { Bot, InlineKeyboard, Keyboard, session } from "grammy";
+import { Bot, InlineKeyboard, Keyboard, InputFile, session } from "grammy";
 import { conversations, createConversation } from "@grammyjs/conversations";
 import dotenv from "dotenv";
 import http from "node:http";
@@ -6,6 +6,12 @@ import { MyContext, SessionData } from "./types.js";
 import { dbService, OrderRecord, OrderItem } from "./database.js";
 import { activeCategoryMap } from "./state.js";
 import { md } from "./format.js";
+import {
+  generateExcelTemplate,
+  parseExcelBuffer,
+  importProductsToDb,
+  ParsedItem
+} from "./excel.js";
 import {
   checkoutConversation,
   addCategoryConversation,
@@ -24,6 +30,9 @@ if (!token) {
 }
 
 export const bot = new Bot<MyContext>(token);
+
+// Кэш для подтверждения импорта Excel
+const pendingExcelImports = new Map<string, { items: ParsedItem[]; filename: string; timestamp: number }>();
 
 bot.use(session({ initial: (): SessionData => ({ targetCategoryId: null }) }));
 bot.use(conversations());
@@ -125,8 +134,10 @@ async function showAdminPanel(ctx: MyContext) {
     .text("📁 Открыть Склад", "cat_nav_root").row()
     .text("📋 Все заявки склада", "view_orders_all").row()
     .text("📁 + Создать корневые папки", "admin_create_root_cat").row()
+    .text("📊 Загрузить Excel", "admin_excel_start")
+    .text("📥 Шаблон Excel", "admin_excel_template").row()
     .text("👑 Сменить владельца", "admin_transfer_owner").row()
-    .text("👤 Стать покупателем (сбросить)", "admin_drop_role").row()
+    .text("👤 Режим покупателя", "admin_drop_role").row()
     .text("🔄 Обновить", "admin_refresh").row()
     .text("◀️ В меню", "menu_main");
 
@@ -483,6 +494,196 @@ bot.callbackQuery("admin_refresh", async (ctx) => {
   await showAdminPanel(ctx);
 });
 
+// ======================== ИМПОРТ ИЗ EXCEL ========================
+
+async function showExcelImportInfo(ctx: MyContext) {
+  if (!isAdmin(ctx)) return;
+
+  const text =
+    `📊 **Импорт товаров и категорий из Excel**\n\n` +
+    `Вы можете загрузить весь склад одним файлом формата **.xlsx**, **.xls** или **.csv**.\n\n` +
+    `📋 **Требуемые колонки таблицы:**\n` +
+    `• **Категория** — папка товара (подпапки через слэш, напр. \`Табак / Darkside\`)\n` +
+    `• **Товар** — название товара\n` +
+    `• **Цена** — стоимость в рублях\n` +
+    `• **Количество** — остаток на складе (шт)\n\n` +
+    `📎 **Как загрузить:**\n` +
+    `Просто прикрепите и **отправьте Excel файл документом** в этот чат.\n\n` +
+    `Если у вас нет готового файла, скачайте наш готовый шаблон:`;
+
+  const kb = new InlineKeyboard()
+    .text("📥 Скачать шаблон Excel", "admin_excel_template").row()
+    .text("◀️ В управление", "admin_main");
+
+  if (ctx.callbackQuery) {
+    try {
+      await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb });
+    } catch {
+      await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
+    }
+  } else {
+    await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
+  }
+}
+
+bot.command(["excel", "import"], async (ctx) => {
+  await deleteUserMessage(ctx);
+  await showExcelImportInfo(ctx);
+});
+
+bot.callbackQuery("admin_excel_start", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await showExcelImportInfo(ctx);
+});
+
+bot.callbackQuery("admin_excel_template", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  try {
+    const buf = generateExcelTemplate();
+    await ctx.replyWithDocument(new InputFile(buf, "shablon_sklada.xlsx"), {
+      caption: "📥 **Шаблон для заполнения склада**\n\nЗаполните строки своими товарами и отправьте файл обратно боту документом.",
+      parse_mode: "Markdown"
+    });
+  } catch (err: any) {
+    await ctx.reply(`❌ Ошибка генерации шаблона: ${err?.message || "сбой"}`);
+  }
+});
+
+bot.on("message:document", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+
+  const doc = ctx.message.document;
+  const fileName = doc.file_name || "file.xlsx";
+  const isExcel = /\.(xlsx|xls|csv)$/i.test(fileName);
+  if (!isExcel) return;
+
+  const waitMsg = await ctx.reply("⏳ Загружаю и анализирую Excel файл...");
+
+  try {
+    const file = await ctx.api.getFile(doc.file_id);
+    if (!file.file_path) {
+      throw new Error("Не удалось получить путь к файлу Telegram");
+    }
+
+    const downloadUrl = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
+    const response = await fetch(downloadUrl);
+    if (!response.ok) {
+      throw new Error(`Ошибка загрузки: ${response.statusText}`);
+    }
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    const parseResult = parseExcelBuffer(buffer);
+
+    if (parseResult.items.length === 0) {
+      await ctx.api.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {});
+      const kb = new InlineKeyboard().text("📥 Скачать пример шаблона", "admin_excel_template");
+      await ctx.reply(
+        "❌ **В файле не найдено строк с товарами.**\n\nУбедитесь, что в файле есть колонки `Категория`, `Товар`, `Цена`, `Количество`.\nИли скачайте шаблон:",
+        { parse_mode: "Markdown", reply_markup: kb }
+      );
+      return;
+    }
+
+    const importId = Math.random().toString(36).substring(2, 9);
+    pendingExcelImports.set(importId, {
+      items: parseResult.items,
+      filename: fileName,
+      timestamp: Date.now()
+    });
+
+    const now = Date.now();
+    for (const [k, v] of pendingExcelImports.entries()) {
+      if (now - v.timestamp > 30 * 60 * 1000) pendingExcelImports.delete(k);
+    }
+
+    const uniqueCats = new Set(parseResult.items.map(i => i.categoryPath.join(" / ")));
+
+    let previewText = `📊 **Анализ Excel: \`${md(fileName)}\`**\n`;
+    previewText += `━━━━━━━━━━━━━━━━━━━━\n`;
+    previewText += `📦 Найдено товаров: **${parseResult.items.length} шт.**\n`;
+    previewText += `📁 Папок / категорий: **${uniqueCats.size}**\n\n`;
+    previewText += `**Примеры распознанных позиций:**\n`;
+
+    const sample = parseResult.items.slice(0, 4);
+    for (const item of sample) {
+      previewText += `• _${md(item.categoryPath.join(" / "))}_ — **${md(item.name)}** (${item.price} ₽, ${item.stock} шт.)\n`;
+    }
+    if (parseResult.items.length > 4) {
+      previewText += `_...и ещё ${parseResult.items.length - 4} позиций_\n`;
+    }
+
+    previewText += `\n**Выберите способ загрузки:**\n`;
+    previewText += `1️⃣ **Добавить к остаткам** — существующие товары суммируют кол-во, новые добавятся.\n`;
+    previewText += `2️⃣ **Обновить остатки** — остатки товаров перезапишутся числами из файла.\n`;
+    previewText += `3️⃣ **Полная замена** — очистит текущий каталог и загрузит склад с нуля.`;
+
+    const kb = new InlineKeyboard()
+      .text("➕ 1. Добавить к остаткам", `excel_run_add_${importId}`).row()
+      .text("🔄 2. Обновить остатки", `excel_run_replace_${importId}`).row()
+      .text("⚠️ 3. Полная замена склада", `excel_run_wipe_${importId}`).row()
+      .text("❌ Отмена", `excel_cancel_${importId}`);
+
+    await ctx.api.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {});
+    await ctx.reply(previewText, { parse_mode: "Markdown", reply_markup: kb });
+  } catch (err: any) {
+    await ctx.api.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {});
+    await ctx.reply(`❌ Ошибка обработки Excel файла: ${err?.message || "неизвестная ошибка"}`);
+  }
+});
+
+bot.callbackQuery(/^excel_run_(add|replace|wipe)_(\w+)$/, async (ctx) => {
+  if (!isAdmin(ctx)) {
+    await ctx.answerCallbackQuery({ text: "Только для администратора!", show_alert: true });
+    return;
+  }
+
+  const rawMode = ctx.match[1];
+  const importId = ctx.match[2];
+  const pending = pendingExcelImports.get(importId);
+
+  if (!pending) {
+    await ctx.answerCallbackQuery({ text: "Время сессии истекло, отправьте файл повторно.", show_alert: true });
+    return;
+  }
+
+  await ctx.answerCallbackQuery({ text: "Выполняю импорт..." });
+
+  const mode = rawMode === "add" ? "add" : rawMode === "replace" ? "replace_stock" : "wipe_all";
+  const result = importProductsToDb(pending.items, mode);
+  pendingExcelImports.delete(importId);
+
+  let resultText = `✅ **Импорт из Excel успешно завершён!**\n`;
+  resultText += `━━━━━━━━━━━━━━━━━━━━\n`;
+  resultText += `📁 Создано новых папок: **${result.categoriesCreated}**\n`;
+  resultText += `📦 Создано новых товаров: **${result.productsCreated} шт.**\n`;
+  resultText += `🔄 Обновлено товаров: **${result.productsUpdated} шт.**\n`;
+  resultText += `📊 Всего обработано: **${result.totalProcessed} шт.**\n`;
+
+  if (result.errors.length > 0) {
+    resultText += `\n⚠️ _Ошибки в ${result.errors.length} строках:_ \n${result.errors.slice(0, 3).join("\n")}`;
+  }
+
+  const kb = new InlineKeyboard()
+    .text("📁 Открыть Склад", "cat_nav_root").row()
+    .text("⚙️ В управление", "admin_main");
+
+  try {
+    await ctx.editMessageText(resultText, { parse_mode: "Markdown", reply_markup: kb });
+  } catch {
+    await ctx.reply(resultText, { parse_mode: "Markdown", reply_markup: kb });
+  }
+});
+
+bot.callbackQuery(/^excel_cancel_(\w+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "Отменено" });
+  const importId = ctx.match[1];
+  pendingExcelImports.delete(importId);
+  try {
+    await ctx.deleteMessage();
+  } catch {}
+});
+
 // ======================== УПРАВЛЕНИЕ ЗАЯВКАМИ ========================
 
 const STATUS_ICONS: Record<string, string> = {
@@ -725,7 +926,8 @@ async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
       kb.text("📁 + Папка", `admin_add_subcat_${categoryId}`);
       kb.text("📦 + Товар", `admin_add_single_${categoryId}`).row();
     } else {
-      kb.text("📁 + Создать папки", "admin_create_root_cat").row();
+      kb.text("📁 + Создать папки", "admin_create_root_cat");
+      kb.text("📊 Загрузить Excel", "admin_excel_start").row();
     }
   }
 

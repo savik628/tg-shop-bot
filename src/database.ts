@@ -331,6 +331,37 @@ export const dbService = {
     return Number(info.lastInsertRowid);
   },
 
+  findOrCreateCategoryPath(pathSegments: string[]): { categoryId: number; createdCount: number } {
+    let parentId: number | null = null;
+    let createdCount = 0;
+
+    for (const segment of pathSegments) {
+      const trimmed = segment.trim();
+      if (!trimmed) continue;
+
+      const existing: { id: number } | undefined = parentId === null
+        ? (db.prepare("SELECT id FROM categories WHERE parent_id IS NULL AND LOWER(name) = LOWER(?)").get(trimmed) as { id: number } | undefined)
+        : (db.prepare("SELECT id FROM categories WHERE parent_id = ? AND LOWER(name) = LOWER(?)").get(parentId, trimmed) as { id: number } | undefined);
+
+      if (existing) {
+        parentId = existing.id;
+      } else {
+        const info = db.prepare("INSERT INTO categories (name, parent_id) VALUES (?, ?)").run(trimmed, parentId);
+        parentId = Number(info.lastInsertRowid);
+        createdCount++;
+      }
+    }
+
+    if (parentId === null) {
+      const existing = db.prepare("SELECT id FROM categories WHERE parent_id IS NULL AND LOWER(name) = 'разное'").get() as { id: number } | undefined;
+      if (existing) return { categoryId: existing.id, createdCount };
+      const info = db.prepare("INSERT INTO categories (name, parent_id) VALUES ('Разное', NULL)").run();
+      return { categoryId: Number(info.lastInsertRowid), createdCount: createdCount + 1 };
+    }
+
+    return { categoryId: parentId, createdCount };
+  },
+
   addCategoriesBatch(names: string[], parentId: number | null = null): number {
     const stmt = db.prepare("INSERT INTO categories (name, parent_id) VALUES (?, ?)");
     const tx = db.transaction(() => {
