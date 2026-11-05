@@ -117,6 +117,7 @@ async function showAdminPanel(ctx: MyContext) {
     .text("📋 Все заявки склада", "view_orders_all").row()
     .text("📁 + Создать корневые папки", "admin_create_root_cat").row()
     .text("👑 Сменить владельца", "admin_transfer_owner").row()
+    .text("👤 Стать покупателем (сбросить)", "admin_drop_role").row()
     .text("🔄 Обновить", "admin_refresh").row()
     .text("◀️ В меню", "menu_main");
 
@@ -289,11 +290,32 @@ bot.command("claim_admin", async (ctx) => {
   await showAdminPanel(ctx);
 });
 
-bot.command("reset_admin", async (ctx) => {
+bot.callbackQuery("admin_drop_role", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "Статус владельца сброшен" });
+  dbService.clearAdminId();
+  await ctx.reply(
+    "🔄 **Вы переключились в режим покупателя!**\n\nКлавиатура обновлена.\n\n💡 _Чтобы вернуть права владельца, напишите:_ `/claim_admin`",
+    {
+      parse_mode: "Markdown",
+      reply_markup: getBottomKeyboard(ctx)
+    }
+  );
+});
+
+async function handleResetAdmin(ctx: MyContext) {
   await deleteUserMessage(ctx);
   dbService.clearAdminId();
-  await ctx.reply("🔄 Владелец сброшен! Теперь можно назначить владельца заново командой /claim_admin.");
-});
+  await ctx.reply(
+    "🔄 **Статус владельца сброшен!**\n\nТеперь вы обычный покупатель. Клавиатура обновлена.\n\n💡 _Чтобы вернуть права владельца, напишите:_ `/claim_admin`",
+    {
+      parse_mode: "Markdown",
+      reply_markup: getBottomKeyboard(ctx)
+    }
+  );
+}
+
+bot.command("reset_admin", handleResetAdmin);
+bot.hears(/^(убери владельца|сбросить владельца|сброс админа)$/i, handleResetAdmin);
 
 bot.command("set_orders_chat", async (ctx) => {
   if (!isAdmin(ctx) && ctx.chat?.type === "private") {

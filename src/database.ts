@@ -182,8 +182,9 @@ export const dbService = {
   // Настройки (Admin ID)
   getAdminId(): number | null {
     const row = db.prepare("SELECT value FROM settings WHERE key = 'admin_id'").get() as { value: string } | undefined;
-    if (row && parseInt(row.value, 10) > 0) {
-      return parseInt(row.value, 10);
+    if (row) {
+      const val = parseInt(row.value, 10);
+      return val > 0 ? val : null;
     }
     const envAdmin = process.env.ADMIN_ID;
     if (envAdmin && parseInt(envAdmin, 10) > 0) {
@@ -201,7 +202,11 @@ export const dbService = {
   },
 
   clearAdminId(): void {
-    db.prepare("DELETE FROM settings WHERE key = 'admin_id'").run();
+    db.prepare(`
+      INSERT INTO settings (key, value)
+      VALUES ('admin_id', '0')
+      ON CONFLICT(key) DO UPDATE SET value = '0'
+    `).run();
   },
 
   // Отдельная группа для заявок (ORDERS_CHAT_ID)
