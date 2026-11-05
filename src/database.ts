@@ -276,7 +276,7 @@ export const dbService = {
   // Google Таблицы
   getGoogleSheetsUrl(): string | null {
     const row = db.prepare("SELECT value FROM settings WHERE key = 'google_sheets_url'").get() as { value: string } | undefined;
-    return row?.value || process.env.GOOGLE_SHEETS_URL || null;
+    return row?.value || process.env.GOOGLE_SHEETS_URL || "https://docs.google.com/spreadsheets/d/1jKFByaK0TE1wDQv7hpTdpiYHM0avYjEvZVfUDh1UTC0/edit";
   },
 
   setGoogleSheetsUrl(url: string | null): void {

@@ -1506,7 +1506,7 @@ bot.catch((err) => {
 // ======================== HTTP СЕРВЕР, ANTI-SLEEP И АВТОВОССТАНОВЛЕНИЕ ========================
 
 function startKeepAliveEngine() {
-  const pingUrl = process.env.RENDER_EXTERNAL_URL || process.env.APP_URL || process.env.PING_URL;
+  const pingUrl = process.env.RENDER_EXTERNAL_URL || process.env.APP_URL || process.env.PING_URL || "https://tg-shop-bot-obnn.onrender.com";
   if (!pingUrl) {
     console.log("ℹ️ Keep-Alive: URL не задан. Если вы на Render, добавьте переменную APP_URL со ссылкой на ваш сервис.");
     return;
