@@ -7,11 +7,7 @@ import { dbService } from "./database.js";
 import {
   checkoutConversation,
   addCategoryConversation,
-  renameCategoryConversation,
-  addBatchProductsConversation,
-  addSingleProductConversation,
-  updateStockConversation,
-  updatePriceConversation
+  addSingleProductConversation
 } from "./conversations.js";
 
 dotenv.config();
@@ -29,11 +25,7 @@ bot.use(conversations());
 
 bot.use(createConversation(checkoutConversation));
 bot.use(createConversation(addCategoryConversation));
-bot.use(createConversation(renameCategoryConversation));
-bot.use(createConversation(addBatchProductsConversation));
 bot.use(createConversation(addSingleProductConversation));
-bot.use(createConversation(updateStockConversation));
-bot.use(createConversation(updatePriceConversation));
 
 // Проверка на админа
 function isAdmin(ctx: MyContext): boolean {
@@ -57,14 +49,12 @@ function getBottomKeyboard(ctx: MyContext): Keyboard {
   return kb.resized();
 }
 
-// Удаление сообщения пользователя для поддержания чистоты чата
 async function deleteUserMessage(ctx: MyContext) {
   try {
     await ctx.deleteMessage();
   } catch {}
 }
 
-// Главная инлайн-клавиатура
 function getMainMenu(ctx: MyContext): InlineKeyboard {
   const kb = new InlineKeyboard()
     .text("📁 Открыть Мой Склад", "cat_nav_root")
@@ -82,17 +72,17 @@ function getMainMenu(ctx: MyContext): InlineKeyboard {
 // Панель управления
 async function showAdminPanel(ctx: MyContext) {
   const stats = dbService.getStats();
-  const text = `⚙️ **Панель управления магазином и складом**\n\n` +
-    `📊 **Сводка по складу:**\n` +
-    `• Всего товаров на складе: **${stats.productsCount} шт.**\n` +
+  const text = `⚙️ **Управление складом**\n\n` +
+    `📊 **Сводка:**\n` +
+    `• Товаров на складе: **${stats.productsCount} шт.**\n` +
     `• Оформлено заявок: **${stats.ordersCount}**\n` +
-    `• Общая сумма продаж: **${stats.totalSales} ₽**\n\n` +
-    `📁 _Вы можете переходить в любые папки склада, создавать вложенные подпапки списком и массово загружать товары._`;
+    `• Выручка: **${stats.totalSales} ₽**\n\n` +
+    `_Для добавления товаров и папок перейдите в склад._`;
 
   const kb = new InlineKeyboard()
-    .text("📁 Перейти к папкам склада", "cat_nav_root").row()
+    .text("📁 Открыть Мой Склад", "cat_nav_root").row()
     .text("📁 + Создать корневые папки", "admin_create_root_cat").row()
-    .text("🔄 Обновить статистику", "admin_refresh").row()
+    .text("🔄 Обновить", "admin_refresh").row()
     .text("◀️ В меню", "menu_main");
 
   if (ctx.callbackQuery) {
@@ -111,7 +101,7 @@ async function showAdminPanel(ctx: MyContext) {
 bot.command("start", async (ctx) => {
   await deleteUserMessage(ctx);
   const name = ctx.from?.first_name || "друг";
-  const text = `👋 Здравствуйте, ${name}!\n\nДобро пожаловать в систему онлайн-склада.\nДля навигации используйте кнопки внизу:`;
+  const text = `👋 Здравствуйте, ${name}!\n\nДобро пожаловать в онлайн-склад.\nИспользуйте кнопки меню для навигации:`;
   await ctx.reply(text, { reply_markup: getBottomKeyboard(ctx) });
   await renderWarehouseView(ctx, null);
 });
@@ -149,7 +139,7 @@ bot.callbackQuery("claim_admin_click", async (ctx) => {
   dbService.setAdminId(uid);
   await ctx.answerCallbackQuery({ text: "Вы назначены владельцем!" });
   await ctx.reply(
-    `🎉 **Вы назначены владельцем склада!**\n\n🆔 Ваш Telegram ID: \`${uid}\`\n\n💡 _Чтобы статус админа сохранялся всегда при перезапусках Render, укажите в Render (Environment):_\n\`ADMIN_ID=${uid}\``,
+    `🎉 **Вы назначены владельцем склада!**\n\n🆔 Ваш Telegram ID: \`${uid}\`\n\n💡 _Совет:_ чтобы статус админа сохранялся всегда при перезапусках Render, укажите в Render (Environment):\n\`ADMIN_ID=${uid}\``,
     {
       parse_mode: "Markdown",
       reply_markup: getBottomKeyboard(ctx)
@@ -229,12 +219,12 @@ bot.callbackQuery("admin_main", async (ctx) => {
 });
 
 bot.callbackQuery("admin_refresh", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Данные обновлены" });
+  await ctx.answerCallbackQuery({ text: "Обновлено" });
   if (!isAdmin(ctx)) return;
   await showAdminPanel(ctx);
 });
 
-// ======================== СИСТЕМА «МОЙ СКЛАД» (ПАПКИ И ТОВАРЫ) ========================
+// ======================== ИНТУИТИВНЫЙ МОЙ СКЛАД ========================
 
 async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
   const isAdm = isAdmin(ctx);
@@ -245,34 +235,28 @@ async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
 
   const kb = new InlineKeyboard();
 
-  // 1. Отображение вложенных папок
+  // 1. Папки (с количеством товаров внутри)
   subcategories.forEach((sub, idx) => {
-    const metaParts = [];
-    if (sub.subfolders_count > 0) metaParts.push(`${sub.subfolders_count} 📁`);
-    if (sub.products_count > 0) metaParts.push(`${sub.products_count} 📦`);
-    const meta = metaParts.length > 0 ? ` [${metaParts.join(" | ")}]` : "";
-
-    kb.text(`📁 ${sub.name}${meta}`, `cat_nav_${sub.id}`);
+    const countTag = sub.products_count > 0 ? ` [${sub.products_count} 📦]` : "";
+    kb.text(`📁 ${sub.name}${countTag}`, `cat_nav_${sub.id}`);
     if (idx % 2 === 1) kb.row();
   });
   if (subcategories.length % 2 !== 0) kb.row();
 
-  // 2. Отображение товаров в текущей папке
+  // 2. Товары
   products.forEach((p) => {
-    const status = p.stock > 0 ? `${p.price} ₽ | ${p.stock} шт.` : "❌ Нет в наличии";
-    kb.text(`📦 ${p.name} (${status})`, `prod_${p.id}`).row();
+    const status = p.stock > 0 ? `${p.price} ₽ | ${p.stock} шт.` : "❌ Нет";
+    kb.text(`📦 ${p.name} — ${status}`, `prod_${p.id}`).row();
   });
 
-  // 3. Блок управления для администратора внутри папки
+  // 3. Лаконичные кнопки для админа: ТОЛЬКО "+ Папка" и "+ Товар"
   if (isAdm) {
     if (categoryId !== null) {
-      kb.text("➕ Добавить товар", `admin_add_single_${categoryId}`);
-      kb.text("⚡️ Товары списком", `admin_add_batch_${categoryId}`).row();
-      kb.text("📁 + Создать подпапки", `admin_add_subcat_${categoryId}`);
-      kb.text("✏️ Переименовать", `admin_rename_cat_${categoryId}`).row();
+      kb.text("📁 + Папка", `admin_add_subcat_${categoryId}`);
+      kb.text("📦 + Товар", `admin_add_single_${categoryId}`).row();
       kb.text("🗑 Удалить эту папку", `admin_del_cat_${categoryId}`).row();
     } else {
-      kb.text("📁 + Создать папки (категории)", "admin_create_root_cat").row();
+      kb.text("📁 + Создать папки", "admin_create_root_cat").row();
     }
   }
 
@@ -286,20 +270,19 @@ async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
     }
     kb.row();
   } else {
-    kb.text("◀️ Главное меню", "menu_main").row();
+    kb.text("◀️ В меню", "menu_main").row();
   }
 
-  // Текст сообщения
-  let text = `${pathTitle}\n`;
+  // Заголовок с полным корневым деревом
+  let text = `📍 **${pathTitle}**\n`;
   text += `━━━━━━━━━━━━━━━━━━━━\n`;
-  text += `📊 **Внутри:** папок: **${subcategories.length}**, товаров: **${products.length}**\n\n`;
 
   if (subcategories.length === 0 && products.length === 0) {
     text += isAdm
-      ? `_Папка пуста. Нажмите «📁 + Создать папки» или «⚡️ + Товары списком» ниже._`
+      ? `_В этой папке пока пусто._\n_Используйте кнопки «📁 + Папка» или «📦 + Товар» ниже._`
       : `_В этом разделе пока нет товаров._`;
   } else {
-    text += `Выберите подпапку или товар:`;
+    text += `Папок: **${subcategories.length}** | Товаров: **${products.length}**\n`;
   }
 
   if (ctx.callbackQuery) {
@@ -324,7 +307,7 @@ bot.callbackQuery(/^cat_nav_(\d+)$/, async (ctx) => {
   await renderWarehouseView(ctx, catId);
 });
 
-// Создание корневых папок (поддерживает несколько подряд)
+// Создание папок в корне
 bot.callbackQuery("admin_create_root_cat", async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!isAdmin(ctx)) return;
@@ -332,7 +315,7 @@ bot.callbackQuery("admin_create_root_cat", async (ctx) => {
   await ctx.conversation.enter("addCategoryConversation");
 });
 
-// Создание подпапок внутри текущей папки (поддерживает несколько подряд)
+// Создание папок строго внутри текущей открытой папки
 bot.callbackQuery(/^admin_add_subcat_(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!isAdmin(ctx)) return;
@@ -341,25 +324,7 @@ bot.callbackQuery(/^admin_add_subcat_(\d+)$/, async (ctx) => {
   await ctx.conversation.enter("addCategoryConversation");
 });
 
-// Переименование папки
-bot.callbackQuery(/^admin_rename_cat_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  if (!isAdmin(ctx)) return;
-  const catId = parseInt(ctx.match[1], 10);
-  (ctx.session as any).targetCategoryId = catId;
-  await ctx.conversation.enter("renameCategoryConversation");
-});
-
-// Массовое добавление товаров
-bot.callbackQuery(/^admin_add_batch_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  if (!isAdmin(ctx)) return;
-  const catId = parseInt(ctx.match[1], 10);
-  (ctx.session as any).targetCategoryId = catId;
-  await ctx.conversation.enter("addBatchProductsConversation");
-});
-
-// Одиночное добавление товара
+// Потоковое добавление товаров
 bot.callbackQuery(/^admin_add_single_(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!isAdmin(ctx)) return;
@@ -377,7 +342,7 @@ bot.callbackQuery(/^admin_del_cat_(\d+)$/, async (ctx) => {
   const parentId = cat?.parent_id ?? null;
 
   dbService.deleteCategory(catId);
-  await ctx.answerCallbackQuery({ text: "Папка и всё её содержимое удалены" });
+  await ctx.answerCallbackQuery({ text: "Папка удалена" });
   await renderWarehouseView(ctx, parentId);
 });
 
@@ -404,7 +369,7 @@ bot.callbackQuery(/^prod_(\d+)$/, async (ctx) => {
     text += `${product.description}\n\n`;
   }
   text += `💰 Цена: **${product.price} ₽**\n`;
-  text += `📊 Складской остаток: ${stockText}\n`;
+  text += `📊 На складе: ${stockText}\n`;
 
   const kb = new InlineKeyboard();
   if (inStock) {
@@ -412,9 +377,7 @@ bot.callbackQuery(/^prod_(\d+)$/, async (ctx) => {
   }
 
   if (isAdmin(ctx)) {
-    kb.text("🗑 Удалить товар", `admin_del_prod_${product.id}`).row();
-    kb.text("💰 Изменить цену", `edit_price_${product.id}`);
-    kb.text("📦 Изменить остаток", `edit_stock_${product.id}`).row();
+    kb.text("🗑 Удалить этот товар", `admin_del_prod_${product.id}`).row();
   }
 
   kb.text("🛒 В корзину", "menu_cart");
@@ -449,9 +412,7 @@ bot.callbackQuery(/^cart_add_(\d+)$/, async (ctx) => {
       kb.text("➕ Добавить ещё (+1)", `cart_add_${product.id}`).row();
     }
     if (isAdmin(ctx)) {
-      kb.text("✏️ Изменить остаток", `edit_stock_${product.id}`);
-      kb.text("💰 Изменить цену", `edit_price_${product.id}`).row();
-      kb.text("❌ Удалить этот товар", `admin_del_prod_${product.id}`).row();
+      kb.text("🗑 Удалить этот товар", `admin_del_prod_${product.id}`).row();
     }
     kb.text("🛒 В корзину", "menu_cart");
     kb.text("◀️ Назад в папку", `cat_nav_${product.category_id}`).row();
@@ -462,30 +423,15 @@ bot.callbackQuery(/^cart_add_(\d+)$/, async (ctx) => {
   }
 });
 
-// Изменение остатка
-bot.callbackQuery(/^edit_stock_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  if (!isAdmin(ctx)) return;
-  await ctx.conversation.enter("updateStockConversation");
-});
-
-// Изменение цены
-bot.callbackQuery(/^edit_price_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  if (!isAdmin(ctx)) return;
-  await ctx.conversation.enter("updatePriceConversation");
-});
-
-// Удаление товара
+// Удаление товара в 1 клик
 bot.callbackQuery(/^admin_del_prod_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  await ctx.answerCallbackQuery({ text: "Товар удалён!" });
   if (!isAdmin(ctx)) return;
   const prodId = parseInt(ctx.match[1], 10);
   const prod = dbService.getProductById(prodId);
   if (prod) {
     const catId = prod.category_id;
     dbService.deleteProduct(prodId);
-    await ctx.answerCallbackQuery({ text: `Товар "${prod.name}" удалён` });
     await renderWarehouseView(ctx, catId);
   }
 });
@@ -502,7 +448,7 @@ async function renderCartView(ctx: MyContext) {
     const kb = new InlineKeyboard()
       .text("📁 Открыть Мой Склад", "cat_nav_root")
       .row()
-      .text("◀️ Главное меню", "menu_main");
+      .text("◀️ В меню", "menu_main");
 
     const emptyText = "🛒 **Ваша корзина пуста.**\n\nВыберите товары на складе, чтобы сформировать заявку.";
     if (ctx.callbackQuery) {
@@ -536,7 +482,7 @@ async function renderCartView(ctx: MyContext) {
   kb.text("✅ Оформить заявку", "cart_checkout").row();
   kb.text("🗑 Очистить корзину", "cart_clear").row();
   kb.text("📁 Продолжить выбор", "cat_nav_root").row();
-  kb.text("◀️ Главное меню", "menu_main");
+  kb.text("◀️ В меню", "menu_main");
 
   if (ctx.callbackQuery) {
     try {
@@ -614,7 +560,7 @@ bot.catch((err) => {
   console.error("Ошибка бота:", err);
 });
 
-// HTTP сервер для healthcheck
+// HTTP сервер для healthcheck Render
 const PORT = process.env.PORT || 3000;
 const server = http.createServer((_req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
@@ -625,9 +571,9 @@ server.listen(PORT, () => {
 });
 
 // Старт бота
-console.log("Запуск @LVoptBot в режиме «Мой Склад»...");
+console.log("Запуск @LVoptBot в ультра-простом режиме...");
 bot.start({
   onStart: (info) => {
-    console.log(`Бот @${info.username} успешно запущен в режиме «Мой Склад»!`);
+    console.log(`Бот @${info.username} успешно запущен в ультра-простом режиме!`);
   }
 });
