@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 import http from "node:http";
 import { MyContext, SessionData } from "./types.js";
 import { dbService, OrderRecord, OrderItem, Product } from "./database.js";
-import { activeCategoryMap } from "./state.js";
+import { activeCategoryMap, activeScreenMessageMap } from "./state.js";
 import { md } from "./format.js";
 import {
   generateExcelTemplate,
@@ -101,6 +101,51 @@ async function deleteUserMessage(ctx: MyContext) {
   } catch {}
 }
 
+export async function sendOrEditScreen(ctx: MyContext, text: string, kb?: InlineKeyboard) {
+  const chatId = ctx.chat?.id;
+  if (!chatId) return;
+
+  const isPrivate = ctx.chat?.type === "private";
+
+  // 1. В приватном диалоге сразу удаляем входящее сообщение пользователя
+  if (isPrivate && ctx.message?.message_id) {
+    await ctx.api.deleteMessage(chatId, ctx.message.message_id).catch(() => {});
+  }
+
+  // 2. Если есть callback_query, пробуем мгновенно отредактировать экран на месте без прыжков
+  if (ctx.callbackQuery?.message?.message_id) {
+    try {
+      await ctx.editMessageText(text, {
+        parse_mode: "Markdown",
+        reply_markup: kb
+      });
+      activeScreenMessageMap.set(chatId, ctx.callbackQuery.message.message_id);
+      return;
+    } catch (err: any) {
+      if (err?.description?.includes("message is not modified")) {
+        return;
+      }
+    }
+  }
+
+  // 3. Удаляем предыдущий экран бота, обеспечивая Single-Window ощущение Web-App
+  const prevMsgId = activeScreenMessageMap.get(chatId);
+  if (prevMsgId && isPrivate) {
+    await ctx.api.deleteMessage(chatId, prevMsgId).catch(() => {});
+  }
+
+  // 4. Отправляем единственный актуальный экран
+  try {
+    const sent = await ctx.reply(text, {
+      parse_mode: "Markdown",
+      reply_markup: kb
+    });
+    activeScreenMessageMap.set(chatId, sent.message_id);
+  } catch (err: any) {
+    console.error("Ошибка отображения экрана:", err?.message);
+  }
+}
+
 function getMainMenu(ctx: MyContext): InlineKeyboard {
   const kb = new InlineKeyboard()
     .text("📁 Открыть Склад", "cat_nav_root")
@@ -160,15 +205,7 @@ async function showAdminPanel(ctx: MyContext) {
     .text("🔄 Обновить сводку", "admin_refresh").row()
     .text("◀️ В меню", "menu_main");
 
-  if (ctx.callbackQuery) {
-    try {
-      await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb });
-    } catch {
-      await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
-    }
-  } else {
-    await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
-  }
+  await sendOrEditScreen(ctx, text, kb);
 }
 
 // Профиль покупателя (имя / заведение)
@@ -186,15 +223,7 @@ async function showCustomerProfile(ctx: MyContext) {
     .text("✏️ Написать имя / заведение", "customer_edit_name").row()
     .text("📁 Перейти к товарам", "cat_nav_root");
 
-  if (ctx.callbackQuery) {
-    try {
-      await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb });
-    } catch {
-      await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
-    }
-  } else {
-    await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
-  }
+  await sendOrEditScreen(ctx, text, kb);
 }
 
 // Контакты заведения для покупателя
@@ -206,24 +235,24 @@ async function showContacts(ctx: MyContext) {
 
   const kb = new InlineKeyboard().text("📁 Перейти к товарам", "cat_nav_root");
 
-  if (ctx.callbackQuery) {
-    try {
-      await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb });
-    } catch {
-      await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
-    }
-  } else {
-    await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
-  }
+  await sendOrEditScreen(ctx, text, kb);
 }
 
 // ======================== КОМАНДЫ ========================
 
 bot.command("start", async (ctx) => {
   await deleteUserMessage(ctx);
-  const name = ctx.from?.first_name || "друг";
-  const text = `👋 Здравствуйте, ${name}!\n\nВыберите товары на складе ниже:`;
-  await ctx.reply(text, { reply_markup: getBottomKeyboard(ctx) });
+  const chatId = ctx.chat?.id;
+  if (chatId) {
+    const prev = activeScreenMessageMap.get(chatId);
+    if (prev) {
+      await ctx.api.deleteMessage(chatId, prev).catch(() => {});
+    }
+    const init = await ctx.reply("⚡️ Загрузка каталога...", { reply_markup: getBottomKeyboard(ctx) });
+    setTimeout(() => {
+      ctx.api.deleteMessage(chatId, init.message_id).catch(() => {});
+    }, 1200);
+  }
   await renderWarehouseView(ctx, null);
 });
 
@@ -534,15 +563,7 @@ async function showExcelImportInfo(ctx: MyContext) {
     .text("📥 Скачать шаблон Excel", "admin_excel_template").row()
     .text("◀️ В управление", "admin_main");
 
-  if (ctx.callbackQuery) {
-    try {
-      await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb });
-    } catch {
-      await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
-    }
-  } else {
-    await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
-  }
+  await sendOrEditScreen(ctx, text, kb);
 }
 
 bot.command(["excel", "import"], async (ctx) => {
@@ -738,15 +759,7 @@ async function showGoogleSheetsDashboard(ctx: MyContext) {
 
   kb.text("◀️ В управление", "admin_main");
 
-  if (ctx.callbackQuery) {
-    try {
-      await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb });
-    } catch {
-      await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
-    }
-  } else {
-    await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
-  }
+  await sendOrEditScreen(ctx, text, kb);
 }
 
 async function syncGoogleSheetsAction(ctx: MyContext) {
@@ -796,7 +809,7 @@ async function syncGoogleSheetsAction(ctx: MyContext) {
       .text("📁 Открыть Склад", "cat_nav_root").row()
       .text("⚙️ В управление", "admin_main");
 
-    await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
+    await sendOrEditScreen(ctx, text, kb);
   } catch (err: any) {
     await ctx.api.deleteMessage(ctx.chat!.id, waitMsg.message_id).catch(() => {});
     await ctx.reply(`❌ Сбой синхронизации: ${err?.message || "неизвестная ошибка"}`);
@@ -894,13 +907,7 @@ async function renderOrdersList(ctx: MyContext, filterStatus?: string) {
       ? "📋 **Заявок пока нет.**\nВсе оформленные заказы будут отображаться здесь."
       : "📋 **У вас пока нет оформленных заказов.**\nСоберите товары на складе и оформите заявку!";
 
-    if (ctx.callbackQuery) {
-      try {
-        await ctx.editMessageText(emptyText, { parse_mode: "Markdown", reply_markup: kb });
-      } catch {}
-    } else {
-      await ctx.reply(emptyText, { parse_mode: "Markdown", reply_markup: kb });
-    }
+    await sendOrEditScreen(ctx, emptyText, kb);
     return;
   }
 
@@ -916,15 +923,7 @@ async function renderOrdersList(ctx: MyContext, filterStatus?: string) {
     ? `📋 **Журнал заявок склада** (${orders.length} шт.):\n_Нажмите на заявку для просмотра и управления:_`
     : `📋 **Ваши заказы** (${orders.length} шт.):`;
 
-  if (ctx.callbackQuery) {
-    try {
-      await ctx.editMessageText(header, { parse_mode: "Markdown", reply_markup: kb });
-    } catch {
-      await ctx.reply(header, { parse_mode: "Markdown", reply_markup: kb });
-    }
-  } else {
-    await ctx.reply(header, { parse_mode: "Markdown", reply_markup: kb });
-  }
+  await sendOrEditScreen(ctx, header, kb);
 }
 
 bot.callbackQuery("view_orders_all", async (ctx) => {
@@ -1006,10 +1005,10 @@ bot.callbackQuery(/^order_view_(\d+)$/, async (ctx) => {
   };
 
   try {
-    await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: buildKb(isAdm) });
+    await sendOrEditScreen(ctx, text, buildKb(isAdm));
   } catch {
     // Telegram отклоняет tg://user ссылку, если клиент запретил её настройками приватности
-    await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: buildKb(false) });
+    await sendOrEditScreen(ctx, text, buildKb(false));
   }
 });
 
@@ -1152,15 +1151,7 @@ async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
     text += `Папок: **${subcategories.length}** | Товаров: **${products.length}**\n`;
   }
 
-  if (ctx.callbackQuery) {
-    try {
-      await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb });
-    } catch {
-      await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
-    }
-  } else {
-    await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
-  }
+  await sendOrEditScreen(ctx, text, kb);
 }
 
 bot.callbackQuery("cat_nav_root", async (ctx) => {
@@ -1180,6 +1171,7 @@ bot.callbackQuery("admin_create_root_cat", async (ctx) => {
   const userId = ctx.from?.id;
   if (userId) activeCategoryMap.set(userId, null);
   await ctx.conversation.enter("addCategoryConversation");
+  await renderWarehouseView(ctx, null);
 });
 
 bot.callbackQuery(/^admin_add_subcat_(\d+)$/, async (ctx) => {
@@ -1189,6 +1181,7 @@ bot.callbackQuery(/^admin_add_subcat_(\d+)$/, async (ctx) => {
   const userId = ctx.from?.id;
   if (userId) activeCategoryMap.set(userId, parentId);
   await ctx.conversation.enter("addCategoryConversation");
+  await renderWarehouseView(ctx, parentId);
 });
 
 bot.callbackQuery(/^admin_add_single_(\d+)$/, async (ctx) => {
@@ -1198,6 +1191,7 @@ bot.callbackQuery(/^admin_add_single_(\d+)$/, async (ctx) => {
   const userId = ctx.from?.id;
   if (userId) activeCategoryMap.set(userId, catId);
   await ctx.conversation.enter("addSingleProductConversation");
+  await renderWarehouseView(ctx, catId);
 });
 
 bot.callbackQuery(/^admin_del_cat_(\d+)$/, async (ctx) => {
@@ -1260,15 +1254,7 @@ async function renderProductAdminCard(ctx: MyContext, product: Product) {
   kb.text("🗑 Удалить", `admin_del_prod_${product.id}`).row();
   kb.text("◀️ Назад в папку", `cat_nav_${product.category_id}`);
 
-  if (ctx.callbackQuery) {
-    try {
-      await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb });
-    } catch {
-      await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
-    }
-  } else {
-    await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
-  }
+  await sendOrEditScreen(ctx, text, kb);
 }
 
 bot.callbackQuery(/^prod_(\d+)$/, async (ctx) => {
@@ -1351,7 +1337,14 @@ bot.callbackQuery(/^cart_add_(\d+)$/, async (ctx) => {
 bot.callbackQuery(/^edit_stock_(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!isAdmin(ctx)) return;
+  const prodId = parseInt(ctx.match[1], 10);
+  const prod = dbService.getProductById(prodId);
   await ctx.conversation.enter("updateStockConversation");
+  if (prod) {
+    await renderWarehouseView(ctx, prod.category_id);
+  } else {
+    await renderWarehouseView(ctx, null);
+  }
 });
 
 bot.callbackQuery(/^admin_del_prod_(\d+)$/, async (ctx) => {
@@ -1382,13 +1375,7 @@ async function renderCartView(ctx: MyContext) {
       .text("📁 Открыть Склад", "cat_nav_root");
 
     const emptyText = "🛒 **Ваша корзина пуста.**\n\nВыберите товары на складе, чтобы сформировать заявку.";
-    if (ctx.callbackQuery) {
-      try {
-        await ctx.editMessageText(emptyText, { parse_mode: "Markdown", reply_markup: kb });
-      } catch {}
-    } else {
-      await ctx.reply(emptyText, { parse_mode: "Markdown", reply_markup: kb });
-    }
+    await sendOrEditScreen(ctx, emptyText, kb);
     return;
   }
 
@@ -1419,13 +1406,7 @@ async function renderCartView(ctx: MyContext) {
   kb.text("📁 Продолжить покупки", backShopTarget);
   kb.text("🗑 Очистить", "cart_clear").row();
 
-  if (ctx.callbackQuery) {
-    try {
-      await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb });
-    } catch {}
-  } else {
-    await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
-  }
+  await sendOrEditScreen(ctx, text, kb);
 }
 
 bot.callbackQuery("menu_cart", async (ctx) => {
@@ -1500,6 +1481,22 @@ bot.callbackQuery("cart_qty_info", async (ctx) => {
 bot.callbackQuery("cart_checkout", async (ctx) => {
   await ctx.answerCallbackQuery();
   await ctx.conversation.enter("checkoutConversation");
+});
+
+// Автоматическая очистка любых посторонних сообщений пользователя в приватном чате (Single-Window / App-режим)
+bot.on([
+  "message:text",
+  "message:sticker",
+  "message:voice",
+  "message:video",
+  "message:photo"
+], async (ctx) => {
+  if (ctx.chat.type !== "private") return;
+  await ctx.deleteMessage().catch(() => {});
+  const chatId = ctx.chat.id;
+  if (!activeScreenMessageMap.get(chatId)) {
+    await renderWarehouseView(ctx, null);
+  }
 });
 
 bot.catch((err) => {

@@ -1,6 +1,6 @@
 import { MyConversation, MyContext } from "./types.js";
 import { dbService } from "./database.js";
-import { activeCategoryMap } from "./state.js";
+import { activeCategoryMap, activeScreenMessageMap } from "./state.js";
 import { InlineKeyboard, Keyboard } from "grammy";
 import { md } from "./format.js";
 import { fetchGoogleSheetsBuffer } from "./googleSheets.js";
@@ -127,10 +127,13 @@ export async function checkoutConversation(conversation: MyConversation, ctx: My
     .text("📁 Вернуться на Склад", "cat_nav_root").row()
     .text("📋 Мои заказы", "user_orders");
 
-  await ctx.reply(userSummary, {
+  const confMsg = await ctx.reply(userSummary, {
     parse_mode: "Markdown",
     reply_markup: backKb
   });
+  if (ctx.chat?.id) {
+    activeScreenMessageMap.set(ctx.chat.id, confMsg.message_id);
+  }
 
   // Отправка заявки администратору или в группу заказов
   const targetChat = dbService.getOrdersChatId() || dbService.getAdminId();
