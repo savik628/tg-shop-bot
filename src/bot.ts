@@ -10,7 +10,8 @@ import {
   addCategoryConversation,
   addSingleProductConversation,
   updateStockConversation,
-  transferOwnerConversation
+  transferOwnerConversation,
+  editCustomerNameConversation
 } from "./conversations.js";
 
 dotenv.config();
@@ -31,13 +32,14 @@ bot.use(createConversation(addCategoryConversation));
 bot.use(createConversation(addSingleProductConversation));
 bot.use(createConversation(updateStockConversation));
 bot.use(createConversation(transferOwnerConversation));
+bot.use(createConversation(editCustomerNameConversation));
 
 // Официальное меню Telegram
 bot.api.setMyCommands([
   { command: "start", description: "📁 Каталог и Склад" },
   { command: "cart", description: "🛒 Корзина заказа" },
   { command: "orders", description: "📋 Мои заказы / Заявки" },
-  { command: "info", description: "🏢 О заведении и контакты" },
+  { command: "profile", description: "👤 Моё имя / профиль" },
   { command: "admin", description: "⚙️ Управление складом" }
 ]).catch(() => {});
 
@@ -64,8 +66,9 @@ function getBottomKeyboard(ctx: MyContext): Keyboard {
     const ordersLabel = newOrders > 0 ? `📋 Заявки (${newOrders} 🆕)` : "📋 Заявки";
     kb.text(ordersLabel).text("⚙️ Управление");
   } else {
-    const venue = dbService.getVenueName();
-    kb.text("📋 Мои заказы").text(`🏢 ${venue}`);
+    const customName = uid ? dbService.getUserProfileName(uid) : null;
+    const profileLabel = customName ? `👤 ${customName}` : "👤 Моё имя";
+    kb.text("📋 Мои заказы").text(profileLabel);
   }
 
   return kb.resized();
@@ -128,24 +131,21 @@ async function showAdminPanel(ctx: MyContext) {
   }
 }
 
-// Карточка заведения
-async function showVenueInfo(ctx: MyContext) {
-  const venue = dbService.getVenueName();
+// Профиль покупателя (имя / заведение)
+async function showCustomerProfile(ctx: MyContext) {
   const uid = ctx.from?.id;
-  const isAdm = dbService.getAdminId() === uid;
+  if (!uid) return;
 
-  let text = `🏢 **${venue}**\n`;
-  text += `━━━━━━━━━━━━━━━━━━━━\n`;
-  text += `💨 Премиальный кальянный парк, чаши и табаки.\n`;
-  text += `🕒 Время работы: **Ежедневно с 12:00 до 02:00**\n`;
-  text += `📍 Самовывоз / Доставка\n\n`;
-  if (isAdm) {
-    text += `💡 _Сменить название: /set_venue Новое Название_\n`;
-  }
+  const profileName = dbService.getUserProfileName(uid);
+
+  let text = `👤 **Профиль покупателя**\n\n`;
+  text += `Имя / Заведение: **${profileName || "Не указано"}**\n`;
+  text += `Telegram ID: \`${uid}\`\n\n`;
+  text += `_Вы можете указать своё имя или название заведения, чтобы при заказе со склада было понятно, от кого поступила заявка._`;
 
   const kb = new InlineKeyboard()
-    .text("📁 Перейти к товарам", "cat_nav_root").row()
-    .text("🛒 Открыть корзину", "menu_cart");
+    .text("✏️ Написать имя / заведение", "customer_edit_name").row()
+    .text("📁 Перейти к товарам", "cat_nav_root");
 
   if (ctx.callbackQuery) {
     try {
@@ -163,8 +163,7 @@ async function showVenueInfo(ctx: MyContext) {
 bot.command("start", async (ctx) => {
   await deleteUserMessage(ctx);
   const name = ctx.from?.first_name || "друг";
-  const venue = dbService.getVenueName();
-  const text = `👋 Здравствуйте, ${name}!\n\nДобро пожаловать в **${venue}**.\nВыберите товары на складе ниже:`;
+  const text = `👋 Здравствуйте, ${name}!\n\nВыберите товары на складе ниже:`;
   await ctx.reply(text, { reply_markup: getBottomKeyboard(ctx) });
   await renderWarehouseView(ctx, null);
 });
@@ -179,9 +178,9 @@ bot.command("orders", async (ctx) => {
   await renderOrdersList(ctx);
 });
 
-bot.command("info", async (ctx) => {
+bot.command(["profile", "name", "info"], async (ctx) => {
   await deleteUserMessage(ctx);
-  await showVenueInfo(ctx);
+  await showCustomerProfile(ctx);
 });
 
 bot.command("admin", async (ctx) => {
@@ -350,9 +349,18 @@ bot.hears(/^⚙️\s*(Управление|Админ-панель).*$/i, async 
   await showAdminPanel(ctx);
 });
 
-bot.hears(/^🏢\s*(.*)$/, async (ctx) => {
+bot.hears(/^(👤|🏢)\s*(.*)$/, async (ctx) => {
   await deleteUserMessage(ctx);
-  await showVenueInfo(ctx);
+  if (isAdmin(ctx)) {
+    await showAdminPanel(ctx);
+  } else {
+    await showCustomerProfile(ctx);
+  }
+});
+
+bot.callbackQuery("customer_edit_name", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await ctx.conversation.enter("editCustomerNameConversation");
 });
 
 bot.callbackQuery("menu_main", async (ctx) => {

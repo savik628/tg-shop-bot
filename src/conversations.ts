@@ -95,11 +95,13 @@ export async function checkoutConversation(conversation: MyConversation, ctx: My
 
   await cleanupMessages(ctx, toClean);
 
-  const userName = [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(" ") || "Покупатель";
+  const customName = dbService.getUserProfileName(userId);
+  const baseName = customName || [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(" ") || "Покупатель";
   const userTag = ctx.from?.username ? `@${ctx.from.username}` : "нет юзернейма";
+  const clientDisplayName = customName ? `${customName} (${userTag})` : `${baseName} (${userTag})`;
 
   const result = await conversation.external(() =>
-    dbService.checkoutOrder(userId, `${userName} (${userTag})`, phone, comment)
+    dbService.checkoutOrder(userId, clientDisplayName, phone, comment)
   );
 
   if (!result.success || !result.items) {
@@ -132,7 +134,7 @@ export async function checkoutConversation(conversation: MyConversation, ctx: My
   if (targetChat) {
     let orderMsg = `🔔 **НОВАЯ ЗАЯВКА #${result.orderId}**\n`;
     orderMsg += `━━━━━━━━━━━━━━━━━━━━\n`;
-    orderMsg += `👤 **Клиент:** ${userName} (${userTag})\n`;
+    orderMsg += `👤 **Клиент / Заведение:** ${clientDisplayName}\n`;
     orderMsg += `🆔 **Telegram ID:** \`${userId}\`\n`;
     orderMsg += `📞 **Телефон:** ${phone}\n`;
     if (comment && comment !== "Без комментария") {
@@ -506,5 +508,57 @@ export async function transferOwnerConversation(conversation: MyConversation, ct
       setTimeout(() => ctx.api.deleteMessage(ctx.chat!.id, m.message_id).catch(() => {}), 3000);
       return;
     }
+  }
+}
+
+// ======================== ИЗМЕНЕНИЕ ИМЕНИ / ЗАВЕДЕНИЯ ПОКУПАТЕЛЯ ========================
+export async function editCustomerNameConversation(conversation: MyConversation, ctx: MyContext) {
+  const userId = ctx.from?.id;
+  if (!userId) return;
+
+  const current = dbService.getUserProfileName(userId);
+  const toClean: number[] = [];
+
+  const kb = new InlineKeyboard().text("❌ Отмена", "cancel_edit_name");
+  const q = await ctx.reply(
+    `👤 **Укажите ваше имя или название заведения**\n\n` +
+    (current ? `Текущее значение: **${current}**\n\n` : "") +
+    `Напишите имя или название сообщением (например \`Мята Lounge\` или \`Алексей\`):\n` +
+    `_Для отмены нажмите кнопку ниже:_`,
+    { parse_mode: "Markdown", reply_markup: kb }
+  );
+  toClean.push(q.message_id);
+
+  while (true) {
+    const res = await conversation.wait();
+
+    if (res.callbackQuery?.data === "cancel_edit_name") {
+      await res.answerCallbackQuery().catch(() => {});
+      await cleanupMessages(ctx, toClean);
+      return;
+    }
+
+    if (res.message?.message_id) {
+      toClean.push(res.message.message_id);
+    }
+
+    if (res.message?.text === "/cancel" || res.message?.text === "❌ Отмена") {
+      await cleanupMessages(ctx, toClean);
+      return;
+    }
+
+    const text = res.message?.text?.trim();
+    if (text && text.length > 0 && text.length <= 50) {
+      await conversation.external(() => dbService.setUserProfileName(userId, text));
+      await cleanupMessages(ctx, toClean);
+      const m = await ctx.reply(`✅ Сохранено: **${text}**`, {
+        parse_mode: "Markdown"
+      });
+      setTimeout(() => ctx.api.deleteMessage(ctx.chat!.id, m.message_id).catch(() => {}), 3000);
+      break;
+    }
+
+    const err = await ctx.reply("Введите текст (от 1 до 50 символов) или /cancel:");
+    toClean.push(err.message_id);
   }
 }

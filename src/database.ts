@@ -49,6 +49,12 @@ db.exec(`
     status TEXT NOT NULL DEFAULT 'new',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE TABLE IF NOT EXISTS user_profiles (
+    user_id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 // Миграции схемы при обновлении
@@ -231,6 +237,20 @@ export const dbService = {
       VALUES ('venue_name', ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
     `).run(name.trim());
+  },
+
+  // Профиль покупателя (имя / заведение)
+  getUserProfileName(userId: number): string | null {
+    const row = db.prepare("SELECT name FROM user_profiles WHERE user_id = ?").get(userId) as { name: string } | undefined;
+    return row?.name || null;
+  },
+
+  setUserProfileName(userId: number, name: string): void {
+    db.prepare(`
+      INSERT INTO user_profiles (user_id, name, updated_at)
+      VALUES (?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(user_id) DO UPDATE SET name = excluded.name, updated_at = CURRENT_TIMESTAMP
+    `).run(userId, name.trim());
   },
 
   // Папки со счётчиками
