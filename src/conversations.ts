@@ -109,38 +109,57 @@ export async function checkoutConversation(conversation: MyConversation, ctx: My
     return;
   }
 
+  // Компактное подтверждение покупателю без спама
   let userSummary = `✅ **Заявка #${result.orderId} принята!**\n\n`;
-  userSummary += `📦 **Состав:**\n`;
-  for (const item of result.items) {
-    userSummary += `• ${item.name} — ${item.quantity} шт. × ${item.price} ₽ = ${item.subtotal} ₽\n`;
+  userSummary += `💰 Сумма к оплате: **${result.total} ₽**\n`;
+  userSummary += `📞 Контакт: **${phone}**\n`;
+  if (comment && comment !== "Без комментария") {
+    userSummary += `💬 Пожелание: _${comment}_\n`;
   }
-  userSummary += `\n💰 **Итого:** ${result.total} ₽\n`;
-  userSummary += `📞 **Телефон:** ${phone}\n`;
-  userSummary += `💬 **Комментарий:** ${comment}\n\n`;
-  userSummary += `Владелец склада получил заявку и свяжется с вами!`;
+  userSummary += `\nЗаявка отправлена менеджеру!`;
+
+  const backKb = new InlineKeyboard()
+    .text("📁 Вернуться на Склад", "cat_nav_root").row()
+    .text("📋 Мои заказы", "user_orders");
 
   await ctx.reply(userSummary, {
     parse_mode: "Markdown",
-    reply_markup: { remove_keyboard: true }
+    reply_markup: backKb
   });
 
-  const adminId = dbService.getAdminId();
-  if (adminId && adminId > 0) {
-    let adminMsg = `🔔 **НОВАЯ ЗАЯВКА #${result.orderId}**\n\n`;
-    adminMsg += `👤 **Покупатель:** ${userName} (${userTag})\n`;
-    adminMsg += `🆔 **Telegram ID:** \`${userId}\`\n`;
-    adminMsg += `📞 **Телефон:** ${phone}\n`;
-    adminMsg += `💬 **Комментарий:** ${comment}\n\n`;
-    adminMsg += `📦 **Состав:**\n`;
-    for (const item of result.items) {
-      adminMsg += `• ${item.name} — ${item.quantity} шт. × ${item.price} ₽ = ${item.subtotal} ₽\n`;
+  // Отправка заявки администратору или в группу заказов
+  const targetChat = dbService.getOrdersChatId() || dbService.getAdminId();
+  if (targetChat) {
+    let orderMsg = `🔔 **НОВАЯ ЗАЯВКА #${result.orderId}**\n`;
+    orderMsg += `━━━━━━━━━━━━━━━━━━━━\n`;
+    orderMsg += `👤 **Клиент:** ${userName} (${userTag})\n`;
+    orderMsg += `🆔 **Telegram ID:** \`${userId}\`\n`;
+    orderMsg += `📞 **Телефон:** ${phone}\n`;
+    if (comment && comment !== "Без комментария") {
+      orderMsg += `💬 **Комментарий:** ${comment}\n`;
     }
-    adminMsg += `\n💰 **ИТОГО:** ${result.total} ₽`;
+    orderMsg += `\n📦 **Состав заказа:**\n`;
+    for (const item of result.items) {
+      orderMsg += `• ${item.name} — ${item.quantity} шт. × ${item.price} ₽ = ${item.subtotal} ₽\n`;
+    }
+    orderMsg += `\n💰 **ИТОГО:** **${result.total} ₽**`;
+
+    const manageKb = new InlineKeyboard()
+      .text("⏳ В работу", `order_status_${result.orderId}_in_progress`)
+      .text("✅ Выполнен", `order_status_${result.orderId}_completed`).row()
+      .text("❌ Отменить (вернуть на склад)", `order_cancel_${result.orderId}`);
+
+    if (ctx.from?.username) {
+      manageKb.row().url("💬 Написать клиенту", `https://t.me/${ctx.from.username}`);
+    }
 
     try {
-      await ctx.api.sendMessage(adminId, adminMsg, { parse_mode: "Markdown" });
+      await ctx.api.sendMessage(targetChat, orderMsg, {
+        parse_mode: "Markdown",
+        reply_markup: manageKb
+      });
     } catch (e: any) {
-      console.error("Не удалось уведомить владельца:", e?.message);
+      console.error("Не удалось уведомить чат заказов:", e?.message);
     }
   }
 }

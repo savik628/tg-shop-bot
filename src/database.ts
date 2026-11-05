@@ -46,15 +46,21 @@ db.exec(`
     comment TEXT,
     total_price REAL NOT NULL,
     items_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'new',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 `);
 
+// Миграции схемы при обновлении
 try {
   db.exec("ALTER TABLE categories ADD COLUMN parent_id INTEGER DEFAULT NULL REFERENCES categories(id) ON DELETE CASCADE");
 } catch {}
 
-// Гарантированное создание структуры категорий по умолчанию (Чаши, Табак -> Спектрум, Блэкберн, Мастхэв, Трофимов, Кальяны)
+try {
+  db.exec("ALTER TABLE orders ADD COLUMN status TEXT NOT NULL DEFAULT 'new'");
+} catch {}
+
+// Гарантированное создание структуры категорий по умолчанию
 function ensureDefaultCategories() {
   const findCat = (name: string, parentId: number | null) => {
     return parentId === null
@@ -154,6 +160,18 @@ export interface OrderItem {
   subtotal: number;
 }
 
+export interface OrderRecord {
+  id: number;
+  user_id: number;
+  user_name: string;
+  phone: string;
+  comment: string;
+  total_price: number;
+  items_json: string;
+  status: "new" | "in_progress" | "completed" | "cancelled";
+  created_at: string;
+}
+
 export const dbService = {
   // Настройки (Admin ID)
   getAdminId(): number | null {
@@ -180,7 +198,42 @@ export const dbService = {
     db.prepare("DELETE FROM settings WHERE key = 'admin_id'").run();
   },
 
-  // Папки (Категории) со счётчиками в стиле «Мой Склад»
+  // Отдельная группа для заявок (ORDERS_CHAT_ID)
+  getOrdersChatId(): number | null {
+    const envChat = process.env.ORDERS_CHAT_ID;
+    if (envChat && parseInt(envChat, 10)) {
+      return parseInt(envChat, 10);
+    }
+    const row = db.prepare("SELECT value FROM settings WHERE key = 'orders_chat_id'").get() as { value: string } | undefined;
+    if (row && parseInt(row.value, 10)) {
+      return parseInt(row.value, 10);
+    }
+    return null;
+  },
+
+  setOrdersChatId(chatId: number): void {
+    db.prepare(`
+      INSERT INTO settings (key, value)
+      VALUES ('orders_chat_id', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(chatId.toString());
+  },
+
+  // Название и инфо о заведении
+  getVenueName(): string {
+    const row = db.prepare("SELECT value FROM settings WHERE key = 'venue_name'").get() as { value: string } | undefined;
+    return row?.value || process.env.VENUE_NAME || "LV Lounge";
+  },
+
+  setVenueName(name: string): void {
+    db.prepare(`
+      INSERT INTO settings (key, value)
+      VALUES ('venue_name', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(name.trim());
+  },
+
+  // Папки со счётчиками
   getCategoriesWithStats(parentId: number | null = null): CategoryWithStats[] {
     const query = `
       SELECT c.*,
@@ -198,7 +251,6 @@ export const dbService = {
     return db.prepare("SELECT * FROM categories WHERE id = ?").get(id) as Category | undefined;
   },
 
-  // Хлебные крошки (путь к текущей папке)
   getCategoryBreadcrumbs(categoryId: number): Category[] {
     const crumbs: Category[] = [];
     let currentId: number | null = categoryId;
@@ -219,14 +271,12 @@ export const dbService = {
     return "📁 Склад / " + crumbs.map(c => c.name).join(" / ");
   },
 
-  // Создание одной папки
   addCategory(name: string, parentId: number | null = null): number {
     const stmt = db.prepare("INSERT INTO categories (name, parent_id) VALUES (?, ?)");
     const info = stmt.run(name.trim(), parentId);
     return Number(info.lastInsertRowid);
   },
 
-  // Массовое создание папок в текущей директории
   addCategoriesBatch(names: string[], parentId: number | null = null): number {
     const stmt = db.prepare("INSERT INTO categories (name, parent_id) VALUES (?, ?)");
     const tx = db.transaction(() => {
@@ -241,10 +291,6 @@ export const dbService = {
       return count;
     });
     return tx();
-  },
-
-  renameCategory(id: number, newName: string): void {
-    db.prepare("UPDATE categories SET name = ? WHERE id = ?").run(newName.trim(), id);
   },
 
   deleteCategory(id: number): void {
@@ -280,7 +326,6 @@ export const dbService = {
     stock: number
   ): { id: number; isUpdated: boolean; totalStock: number; name: string; price: number } {
     const trimmedName = name.trim();
-    // Проверка на существующий товар в этой категории (без учета регистра)
     const existing = db.prepare(`
       SELECT id, name, stock, price FROM products
       WHERE category_id = ? AND LOWER(name) = LOWER(?)
@@ -312,23 +357,6 @@ export const dbService = {
       name: trimmedName,
       price
     };
-  },
-
-  // Пакетное добавление товаров списком с автоматическим слиянием дублей
-  addBatchProducts(
-    categoryId: number,
-    items: Array<{ name: string; price: number; stock: number; description?: string }>
-  ): number {
-    const tx = db.transaction(() => {
-      let count = 0;
-      for (const item of items) {
-        this.addProduct(categoryId, item.name, item.description || "", item.price, item.stock);
-        count++;
-      }
-      return count;
-    });
-
-    return tx();
   },
 
   updateProductStock(id: number, stock: number): void {
@@ -384,9 +412,55 @@ export const dbService = {
     db.prepare("DELETE FROM cart WHERE user_id = ?").run(userId);
   },
 
-  // Статистика магазина
+  // Заказы и заявки
+  getOrders(status?: string): OrderRecord[] {
+    if (status) {
+      return db.prepare("SELECT * FROM orders WHERE status = ? ORDER BY id DESC LIMIT 50").all(status) as OrderRecord[];
+    }
+    return db.prepare("SELECT * FROM orders ORDER BY id DESC LIMIT 50").all() as OrderRecord[];
+  },
+
+  getUserOrders(userId: number): OrderRecord[] {
+    return db.prepare("SELECT * FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT 20").all(userId) as OrderRecord[];
+  },
+
+  getOrderById(id: number): OrderRecord | undefined {
+    return db.prepare("SELECT * FROM orders WHERE id = ?").get(id) as OrderRecord | undefined;
+  },
+
+  updateOrderStatus(orderId: number, status: "new" | "in_progress" | "completed" | "cancelled"): void {
+    db.prepare("UPDATE orders SET status = ? WHERE id = ?").run(status, orderId);
+  },
+
+  // Отмена заказа с возвратом товаров на склад
+  cancelOrderWithStockRefund(orderId: number): { success: boolean; error?: string } {
+    const order = this.getOrderById(orderId);
+    if (!order) return { success: false, error: "Заказ не найден" };
+    if (order.status === "cancelled") return { success: false, error: "Заказ уже отменен" };
+
+    const tx = db.transaction(() => {
+      // Возвращаем товары на склад
+      try {
+        const items: OrderItem[] = JSON.parse(order.items_json);
+        for (const item of items) {
+          db.prepare("UPDATE products SET stock = stock + ? WHERE id = ?").run(item.quantity, item.product_id);
+        }
+      } catch {}
+
+      db.prepare("UPDATE orders SET status = 'cancelled' WHERE id = ?").run(orderId);
+    });
+
+    try {
+      tx();
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  },
+
+  // Статистика
   getStats(): { ordersCount: number; totalSales: number; productsCount: number } {
-    const orders = db.prepare("SELECT COUNT(*) as count, IFNULL(SUM(total_price), 0) as total FROM orders").get() as { count: number; total: number };
+    const orders = db.prepare("SELECT COUNT(*) as count, IFNULL(SUM(total_price), 0) as total FROM orders WHERE status != 'cancelled'").get() as { count: number; total: number };
     const prods = db.prepare("SELECT COUNT(*) as count FROM products").get() as { count: number };
     return {
       ordersCount: orders.count,
@@ -395,7 +469,7 @@ export const dbService = {
     };
   },
 
-  // Оформление заявки (транзакция со списанием остатков)
+  // Оформление заказа со списанием остатков
   checkoutOrder(
     userId: number,
     userName: string,
@@ -434,8 +508,8 @@ export const dbService = {
       }
 
       const orderStmt = db.prepare(`
-        INSERT INTO orders (user_id, user_name, phone, comment, total_price, items_json)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO orders (user_id, user_name, phone, comment, total_price, items_json, status)
+        VALUES (?, ?, ?, ?, ?, ?, 'new')
       `);
       const info = orderStmt.run(userId, userName, phone, comment, total, JSON.stringify(orderItems));
 

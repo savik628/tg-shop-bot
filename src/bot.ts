@@ -3,7 +3,7 @@ import { conversations, createConversation } from "@grammyjs/conversations";
 import dotenv from "dotenv";
 import http from "node:http";
 import { MyContext, SessionData } from "./types.js";
-import { dbService } from "./database.js";
+import { dbService, OrderRecord, OrderItem } from "./database.js";
 import { activeCategoryMap } from "./state.js";
 import {
   checkoutConversation,
@@ -30,6 +30,15 @@ bot.use(createConversation(addCategoryConversation));
 bot.use(createConversation(addSingleProductConversation));
 bot.use(createConversation(updateStockConversation));
 
+// Регистрация официального меню команд Telegram
+bot.api.setMyCommands([
+  { command: "start", description: "📁 Каталог и Склад" },
+  { command: "cart", description: "🛒 Корзина заказа" },
+  { command: "orders", description: "📋 Мои заказы / Заявки" },
+  { command: "info", description: "🏢 О заведении и контакты" },
+  { command: "admin", description: "⚙️ Управление складом" }
+]).catch(() => {});
+
 // Проверка на админа
 function isAdmin(ctx: MyContext): boolean {
   const currentAdmin = dbService.getAdminId();
@@ -38,15 +47,16 @@ function isAdmin(ctx: MyContext): boolean {
 
 // Постоянная нижняя клавиатура
 function getBottomKeyboard(ctx: MyContext): Keyboard {
+  const venue = dbService.getVenueName();
   const kb = new Keyboard()
     .text("📁 Склад")
     .text("🛒 Корзина")
     .row();
 
   if (isAdmin(ctx)) {
-    kb.text("⚙️ Управление").text("ℹ️ Мой ID");
+    kb.text("📋 Заявки").text("⚙️ Управление");
   } else {
-    kb.text("ℹ️ Мой ID");
+    kb.text("📋 Заявки").text(`🏢 ${venue}`);
   }
 
   return kb.resized();
@@ -63,6 +73,8 @@ function getMainMenu(ctx: MyContext): InlineKeyboard {
     .text("📁 Открыть Склад", "cat_nav_root")
     .row()
     .text("🛒 Корзина заказов", "menu_cart")
+    .row()
+    .text("📋 Заявки", "view_orders_all")
     .row();
 
   if (isAdmin(ctx)) {
@@ -72,21 +84,59 @@ function getMainMenu(ctx: MyContext): InlineKeyboard {
   return kb;
 }
 
-// Панель управления
+// ======================== ПАНЕЛЬ УПРАВЛЕНИЯ ========================
+
 async function showAdminPanel(ctx: MyContext) {
   const stats = dbService.getStats();
-  const text = `⚙️ **Управление складом**\n\n` +
-    `📊 **Сводка:**\n` +
-    `• Товаров на складе: **${stats.productsCount} шт.**\n` +
-    `• Оформлено заявок: **${stats.ordersCount}**\n` +
-    `• Выручка: **${stats.totalSales} ₽**\n\n` +
-    `_Для добавления товаров и папок перейдите в склад._`;
+  const venue = dbService.getVenueName();
+  const ordersChat = dbService.getOrdersChatId();
+
+  let text = `⚙️ **Управление складом и заказами**\n\n`;
+  text += `🏢 Заведение: **${venue}**\n`;
+  text += `📢 Чат заказов: **${ordersChat ? `Подключен (${ordersChat})` : "В личку админу"}**\n\n`;
+  text += `📊 **Сводка:**\n`;
+  text += `• Всего товаров: **${stats.productsCount} шт.**\n`;
+  text += `• Активных заказов: **${stats.ordersCount}**\n`;
+  text += `• Общая выручка: **${stats.totalSales} ₽**\n\n`;
+  text += `_Подключите отдельную группу для заказов командой /set_orders_chat в группе._`;
 
   const kb = new InlineKeyboard()
     .text("📁 Открыть Склад", "cat_nav_root").row()
+    .text("📋 Все заявки склада", "view_orders_all").row()
     .text("📁 + Создать корневые папки", "admin_create_root_cat").row()
-    .text("🔄 Обновить", "admin_refresh").row()
+    .text("🔄 Обновить сводку", "admin_refresh").row()
     .text("◀️ В меню", "menu_main");
+
+  if (ctx.callbackQuery) {
+    try {
+      await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb });
+    } catch {
+      await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
+    }
+  } else {
+    await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
+  }
+}
+
+// Карточка заведения
+async function showVenueInfo(ctx: MyContext) {
+  const venue = dbService.getVenueName();
+  const uid = ctx.from?.id;
+  const isAdm = dbService.getAdminId() === uid;
+
+  let text = `🏢 **${venue}**\n`;
+  text += `━━━━━━━━━━━━━━━━━━━━\n`;
+  text += `💨 Премиальный кальянный парк, чаши и табаки.\n`;
+  text += `🕒 Время работы: **Ежедневно с 12:00 до 02:00**\n`;
+  text += `📍 Самовывоз / Доставка\n\n`;
+  text += `🆔 Ваш Telegram ID: \`${uid}\` (${isAdm ? "**Владелец**" : "Покупатель"})\n`;
+  if (isAdm) {
+    text += `\n💡 _Сменить название: /set_venue Новое Название_`;
+  }
+
+  const kb = new InlineKeyboard()
+    .text("📁 Перейти к товарам", "cat_nav_root").row()
+    .text("🛒 Открыть корзину", "menu_cart");
 
   if (ctx.callbackQuery) {
     try {
@@ -104,9 +154,25 @@ async function showAdminPanel(ctx: MyContext) {
 bot.command("start", async (ctx) => {
   await deleteUserMessage(ctx);
   const name = ctx.from?.first_name || "друг";
-  const text = `👋 Здравствуйте, ${name}!\n\nДобро пожаловать в онлайн-склад.\nИспользуйте кнопки меню для навигации:`;
+  const venue = dbService.getVenueName();
+  const text = `👋 Здравствуйте, ${name}!\n\nДобро пожаловать в **${venue}**.\nДля выбора товаров и оформления заявок используйте меню ниже:`;
   await ctx.reply(text, { reply_markup: getBottomKeyboard(ctx) });
   await renderWarehouseView(ctx, null);
+});
+
+bot.command("cart", async (ctx) => {
+  await deleteUserMessage(ctx);
+  await renderCartView(ctx);
+});
+
+bot.command("orders", async (ctx) => {
+  await deleteUserMessage(ctx);
+  await renderOrdersList(ctx);
+});
+
+bot.command("info", async (ctx) => {
+  await deleteUserMessage(ctx);
+  await showVenueInfo(ctx);
 });
 
 bot.command("admin", async (ctx) => {
@@ -134,7 +200,7 @@ bot.callbackQuery("claim_admin_click", async (ctx) => {
   dbService.setAdminId(uid);
   await ctx.answerCallbackQuery({ text: "Вы назначены владельцем!" });
   await ctx.reply(
-    `🎉 **Владелец бота успешно обновлен!**\n\n🆔 Ваш Telegram ID: \`${uid}\`\nТеперь вам доступны все функции управления складом и кнопка «⚙️ Управление» внизу.\n\n💡 _Чтобы права никогда не сбрасывались при перезапуске Render, добавьте в Render (вкладка Environment):_\n\`ADMIN_ID=${uid}\``,
+    `🎉 **Владелец бота успешно обновлен!**\n\n🆔 Ваш Telegram ID: \`${uid}\`\nВам доступен полный контроль над складом и заказами.\n\n💡 _Чтобы права не сбрасывались при обновлении Render, добавьте в Render (Environment):_\n\`ADMIN_ID=${uid}\``,
     {
       parse_mode: "Markdown",
       reply_markup: getBottomKeyboard(ctx)
@@ -150,7 +216,7 @@ bot.command("claim_admin", async (ctx) => {
 
   dbService.setAdminId(uid);
   await ctx.reply(
-    `🎉 **Владелец бота успешно обновлен!**\n\n🆔 Ваш ID: \`${uid}\`\nВам открыт полный доступ к управлению складом.\n\n💡 _Для постоянного сохранения на Render добавьте переменную:_\n\`ADMIN_ID=${uid}\``,
+    `🎉 **Владелец бота успешно обновлен!**\n\n🆔 Ваш ID: \`${uid}\`\n💡 _Для сохранения на Render добавьте:_ \`ADMIN_ID=${uid}\``,
     {
       parse_mode: "Markdown",
       reply_markup: getBottomKeyboard(ctx)
@@ -162,16 +228,37 @@ bot.command("claim_admin", async (ctx) => {
 bot.command("reset_admin", async (ctx) => {
   await deleteUserMessage(ctx);
   dbService.clearAdminId();
-  await ctx.reply("🔄 Владелец сброшен! Теперь любой пользователь может назначить себя командой /claim_admin.");
+  await ctx.reply("🔄 Владелец сброшен! Теперь можно назначить владельца заново командой /claim_admin.");
 });
 
-bot.command("id", async (ctx) => {
-  await deleteUserMessage(ctx);
-  const uid = ctx.from?.id;
-  const isAdm = dbService.getAdminId() === uid;
-  await ctx.reply(`🆔 Ваш Telegram ID: \`${uid}\`\n👑 Статус: ${isAdm ? "**Владелец (Админ)**" : "Покупатель"}`, {
-    parse_mode: "Markdown"
-  });
+// Привязка группы заказов
+bot.command("set_orders_chat", async (ctx) => {
+  if (!isAdmin(ctx) && ctx.chat?.type === "private") {
+    await ctx.reply("❌ Добавьте бота в группу для заказов и выполните команду /set_orders_chat внутри этой группы.");
+    return;
+  }
+  const chatId = ctx.chat?.id;
+  if (chatId) {
+    dbService.setOrdersChatId(chatId);
+    await ctx.reply(`✅ Эта группа успешно привязана для входящих заявок! (ID: \`${chatId}\`)\nВсе новые заказы будут приходить сюда.`, {
+      parse_mode: "Markdown"
+    });
+  }
+});
+
+// Смена названия заведения
+bot.command("set_venue", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const newName = ctx.message?.text?.replace("/set_venue", "").trim();
+  if (newName) {
+    dbService.setVenueName(newName);
+    await ctx.reply(`✅ Название заведения обновлено: **${newName}**!`, {
+      parse_mode: "Markdown",
+      reply_markup: getBottomKeyboard(ctx)
+    });
+  } else {
+    await ctx.reply("Напишите: `/set_venue Название Заведения`", { parse_mode: "Markdown" });
+  }
 });
 
 // ======================== ОБРАБОТЧИКИ НИЖНИХ КНОПОК ========================
@@ -186,6 +273,11 @@ bot.hears(["🛒 Корзина", "🛒 Моя корзина"], async (ctx) => 
   await renderCartView(ctx);
 });
 
+bot.hears(["📋 Заявки", "📋 Мои заказы"], async (ctx) => {
+  await deleteUserMessage(ctx);
+  await renderOrdersList(ctx);
+});
+
 bot.hears(["⚙️ Управление", "⚙️ Админ-панель"], async (ctx) => {
   await deleteUserMessage(ctx);
   if (!isAdmin(ctx)) {
@@ -195,13 +287,10 @@ bot.hears(["⚙️ Управление", "⚙️ Админ-панель"], asy
   await showAdminPanel(ctx);
 });
 
-bot.hears("ℹ️ Мой ID", async (ctx) => {
+// Динамическая обработка кнопки заведения
+bot.hears(/^🏢\s*(.*)$/, async (ctx) => {
   await deleteUserMessage(ctx);
-  const uid = ctx.from?.id;
-  const isAdm = dbService.getAdminId() === uid;
-  await ctx.reply(`🆔 Ваш Telegram ID: \`${uid}\`\n👑 Статус: ${isAdm ? "**Владелец**" : "Покупатель"}`, {
-    parse_mode: "Markdown"
-  });
+  await showVenueInfo(ctx);
 });
 
 bot.callbackQuery("menu_main", async (ctx) => {
@@ -221,7 +310,213 @@ bot.callbackQuery("admin_refresh", async (ctx) => {
   await showAdminPanel(ctx);
 });
 
-// ======================== ИНТУИТИВНЫЙ МОЙ СКЛАД ========================
+// ======================== УПРАВЛЕНИЕ ЗАЯВКАМИ ========================
+
+const STATUS_ICONS: Record<string, string> = {
+  new: "🆕 Новая",
+  in_progress: "⏳ В работе",
+  completed: "✅ Выполнена",
+  cancelled: "❌ Отменена"
+};
+
+async function renderOrdersList(ctx: MyContext, filterStatus?: string) {
+  const isAdm = isAdmin(ctx);
+  const userId = ctx.from?.id;
+  if (!userId) return;
+
+  const orders: OrderRecord[] = isAdm
+    ? dbService.getOrders(filterStatus)
+    : dbService.getUserOrders(userId);
+
+  const kb = new InlineKeyboard();
+
+  if (isAdm) {
+    // Фильтры для админа
+    kb.text(filterStatus ? "Все" : "• Все •", "orders_filter_all")
+      .text(filterStatus === "new" ? "• 🆕 Новые •" : "🆕 Новые", "orders_filter_new")
+      .text(filterStatus === "in_progress" ? "• ⏳ В работе •" : "⏳ В работе", "orders_filter_in_progress")
+      .row();
+  }
+
+  if (orders.length === 0) {
+    kb.text("📁 Открыть Склад", "cat_nav_root").row();
+    const emptyText = isAdm
+      ? "📋 **Заявок пока нет.**\nВсе оформленные заказы будут отображаться здесь."
+      : "📋 **У вас пока нет оформленных заказов.**\nСоберите товары на складе и оформите заявку!";
+
+    if (ctx.callbackQuery) {
+      try {
+        await ctx.editMessageText(emptyText, { parse_mode: "Markdown", reply_markup: kb });
+      } catch {}
+    } else {
+      await ctx.reply(emptyText, { parse_mode: "Markdown", reply_markup: kb });
+    }
+    return;
+  }
+
+  // Список заказов кнопками
+  orders.slice(0, 15).forEach((o) => {
+    const icon = STATUS_ICONS[o.status] || o.status;
+    const title = `#${o.id} | ${o.user_name?.slice(0, 14)} | ${o.total_price} ₽ (${icon})`;
+    kb.text(title, `order_view_${o.id}`).row();
+  });
+
+  kb.text("📁 Вернуться на Склад", "cat_nav_root");
+
+  let header = isAdm
+    ? `📋 **Журнал заявок склада** (${orders.length} шт.):\n_Нажмите на заявку для просмотра и управления:_`
+    : `📋 **Ваши заказы** (${orders.length} шт.):`;
+
+  if (ctx.callbackQuery) {
+    try {
+      await ctx.editMessageText(header, { parse_mode: "Markdown", reply_markup: kb });
+    } catch {
+      await ctx.reply(header, { parse_mode: "Markdown", reply_markup: kb });
+    }
+  } else {
+    await ctx.reply(header, { parse_mode: "Markdown", reply_markup: kb });
+  }
+}
+
+bot.callbackQuery("view_orders_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await renderOrdersList(ctx);
+});
+
+bot.callbackQuery("orders_filter_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await renderOrdersList(ctx);
+});
+
+bot.callbackQuery("orders_filter_new", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await renderOrdersList(ctx, "new");
+});
+
+bot.callbackQuery("orders_filter_in_progress", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await renderOrdersList(ctx, "in_progress");
+});
+
+bot.callbackQuery("user_orders", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await renderOrdersList(ctx);
+});
+
+// Просмотр конкретной заявки
+bot.callbackQuery(/^order_view_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const orderId = parseInt(ctx.match[1], 10);
+  const order = dbService.getOrderById(orderId);
+  const isAdm = isAdmin(ctx);
+
+  if (!order) {
+    await ctx.editMessageText("Заявка не найдена.", {
+      reply_markup: new InlineKeyboard().text("◀️ К заявкам", "view_orders_all")
+    });
+    return;
+  }
+
+  let items: OrderItem[] = [];
+  try {
+    items = JSON.parse(order.items_json);
+  } catch {}
+
+  const statusName = STATUS_ICONS[order.status] || order.status;
+
+  let text = `📋 **Заявка #${order.id}** [${statusName}]\n`;
+  text += `━━━━━━━━━━━━━━━━━━━━\n`;
+  text += `👤 **Клиент:** ${order.user_name}\n`;
+  text += `📞 **Телефон:** ${order.phone || "не указан"}\n`;
+  if (order.comment && order.comment !== "Без комментария") {
+    text += `💬 **Пожелание:** ${order.comment}\n`;
+  }
+  text += `🕒 **Дата:** ${order.created_at}\n\n`;
+
+  text += `📦 **Состав заявки:**\n`;
+  for (const item of items) {
+    text += `• ${item.name} — ${item.quantity} шт. × ${item.price} ₽ = ${item.subtotal} ₽\n`;
+  }
+  text += `\n💰 **ИТОГО:** **${order.total_price} ₽**\n`;
+
+  const kb = new InlineKeyboard();
+
+  if (isAdm) {
+    if (order.status === "new") {
+      kb.text("⏳ Взять в работу", `order_status_${order.id}_in_progress`).row();
+    }
+    if (order.status !== "completed" && order.status !== "cancelled") {
+      kb.text("✅ Завершить заказ", `order_status_${order.id}_completed`).row();
+      kb.text("❌ Отменить (вернуть на склад)", `order_cancel_${order.id}`).row();
+    }
+  }
+
+  kb.text("◀️ Назад к заявкам", "view_orders_all");
+
+  await ctx.editMessageText(text, {
+    parse_mode: "Markdown",
+    reply_markup: kb
+  });
+});
+
+// Смена статуса заявки
+bot.callbackQuery(/^order_status_(\d+)_(in_progress|completed)$/, async (ctx) => {
+  if (!isAdmin(ctx)) {
+    await ctx.answerCallbackQuery({ text: "Только для администратора!", show_alert: true });
+    return;
+  }
+  const orderId = parseInt(ctx.match[1], 10);
+  const status = ctx.match[2] as "in_progress" | "completed";
+
+  dbService.updateOrderStatus(orderId, status);
+  await ctx.answerCallbackQuery({ text: `Статус заявки #${orderId} изменен!` });
+
+  // Уведомим покупателя о смене статуса
+  const order = dbService.getOrderById(orderId);
+  if (order) {
+    const statusText = status === "in_progress"
+      ? `⏳ Ваша заявка #${order.id} принята в работу!`
+      : `✅ Ваша заявка #${order.id} выполнена! Ждём вас снова.`;
+    try {
+      await ctx.api.sendMessage(order.user_id, statusText);
+    } catch {}
+  }
+
+  // Обновим карточку
+  const kb = new InlineKeyboard()
+    .text("◀️ К заявкам", "view_orders_all")
+    .text("📁 На Склад", "cat_nav_root");
+  await ctx.editMessageReplyMarkup({ reply_markup: kb });
+});
+
+// Отмена заявки с авто-возвратом остатков
+bot.callbackQuery(/^order_cancel_(\d+)$/, async (ctx) => {
+  if (!isAdmin(ctx)) {
+    await ctx.answerCallbackQuery({ text: "Только для администратора!", show_alert: true });
+    return;
+  }
+  const orderId = parseInt(ctx.match[1], 10);
+  const res = dbService.cancelOrderWithStockRefund(orderId);
+
+  if (!res.success) {
+    await ctx.answerCallbackQuery({ text: `Ошибка: ${res.error}`, show_alert: true });
+    return;
+  }
+
+  await ctx.answerCallbackQuery({ text: `Заявка #${orderId} отменена, товары возвращены на склад!` });
+
+  const order = dbService.getOrderById(orderId);
+  if (order) {
+    try {
+      await ctx.api.sendMessage(order.user_id, `❌ Ваша заявка #${order.id} была отменена менеджером. Товары возвращены на склад.`);
+    } catch {}
+  }
+
+  const kb = new InlineKeyboard().text("◀️ К заявкам", "view_orders_all");
+  await ctx.editMessageReplyMarkup({ reply_markup: kb });
+});
+
+// ======================== ИНТУИТИВНЫЙ СКЛАД ========================
 
 async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
   const isAdm = isAdmin(ctx);
@@ -235,7 +530,7 @@ async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
 
   const kb = new InlineKeyboard();
 
-  // 1. Папки (с количеством товаров внутри)
+  // 1. Папки
   subcategories.forEach((sub, idx) => {
     const countTag = sub.products_count > 0 ? ` [${sub.products_count} 📦]` : "";
     kb.text(`📁 ${sub.name}${countTag}`, `cat_nav_${sub.id}`);
@@ -249,7 +544,7 @@ async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
     kb.text(`📦 ${p.name} — ${status}`, `prod_${p.id}`).row();
   });
 
-  // 3. Лаконичные кнопки для админа: ТОЛЬКО "+ Папка" и "+ Товар"
+  // 3. Только 2 главные кнопки для админа
   if (isAdm) {
     if (categoryId !== null) {
       kb.text("📁 + Папка", `admin_add_subcat_${categoryId}`);
@@ -273,7 +568,6 @@ async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
     kb.text("◀️ В меню", "menu_main").row();
   }
 
-  // Заголовок с полным корневым деревом
   let text = `📍 **${pathTitle}**\n`;
   text += `━━━━━━━━━━━━━━━━━━━━\n`;
 
@@ -307,7 +601,6 @@ bot.callbackQuery(/^cat_nav_(\d+)$/, async (ctx) => {
   await renderWarehouseView(ctx, catId);
 });
 
-// Создание папок в корне
 bot.callbackQuery("admin_create_root_cat", async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!isAdmin(ctx)) return;
@@ -316,7 +609,6 @@ bot.callbackQuery("admin_create_root_cat", async (ctx) => {
   await ctx.conversation.enter("addCategoryConversation");
 });
 
-// Создание папок строго внутри текущей открытой папки
 bot.callbackQuery(/^admin_add_subcat_(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!isAdmin(ctx)) return;
@@ -326,7 +618,6 @@ bot.callbackQuery(/^admin_add_subcat_(\d+)$/, async (ctx) => {
   await ctx.conversation.enter("addCategoryConversation");
 });
 
-// Потоковое добавление товаров в открытую папку
 bot.callbackQuery(/^admin_add_single_(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!isAdmin(ctx)) return;
@@ -336,7 +627,6 @@ bot.callbackQuery(/^admin_add_single_(\d+)$/, async (ctx) => {
   await ctx.conversation.enter("addSingleProductConversation");
 });
 
-// Удаление папки
 bot.callbackQuery(/^admin_del_cat_(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!isAdmin(ctx)) return;
@@ -393,7 +683,6 @@ bot.callbackQuery(/^prod_(\d+)$/, async (ctx) => {
   });
 });
 
-// Добавление товара в корзину
 bot.callbackQuery(/^cart_add_(\d+)$/, async (ctx) => {
   const userId = ctx.from?.id;
   if (!userId) return;
@@ -416,6 +705,7 @@ bot.callbackQuery(/^cart_add_(\d+)$/, async (ctx) => {
       kb.text("➕ Добавить ещё (+1)", `cart_add_${product.id}`).row();
     }
     if (isAdmin(ctx)) {
+      kb.text("✏️ Изменить остаток", `edit_stock_${product.id}`).row();
       kb.text("🗑 Удалить этот товар", `admin_del_prod_${product.id}`).row();
     }
     kb.text("🛒 В корзину", "menu_cart");
@@ -433,7 +723,6 @@ bot.callbackQuery(/^edit_stock_(\d+)$/, async (ctx) => {
   await ctx.conversation.enter("updateStockConversation");
 });
 
-// Удаление товара в 1 клик
 bot.callbackQuery(/^admin_del_prod_(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery({ text: "Товар удалён!" });
   if (!isAdmin(ctx)) return;
@@ -565,7 +854,6 @@ bot.callbackQuery("cart_checkout", async (ctx) => {
   await ctx.conversation.enter("checkoutConversation");
 });
 
-// Обработка ошибок
 bot.catch((err) => {
   console.error("Ошибка бота:", err);
 });
@@ -580,10 +868,9 @@ server.listen(PORT, () => {
   console.log(`HTTP сервер на порту ${PORT}`);
 });
 
-// Старт бота
-console.log("Запуск @LVoptBot в ультра-простом режиме...");
+console.log("Запуск @LVoptBot...");
 bot.start({
   onStart: (info) => {
-    console.log(`Бот @${info.username} успешно запущен в ультра-простом режиме!`);
+    console.log(`Бот @${info.username} успешно запущен!`);
   }
 });
