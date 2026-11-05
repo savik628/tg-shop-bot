@@ -47,16 +47,33 @@ bot.use(createConversation(transferOwnerConversation));
 bot.use(createConversation(editCustomerNameConversation));
 bot.use(createConversation(bindGoogleSheetsConversation));
 
-// Официальное меню Telegram
+// Публичное меню Telegram (только для покупателей — никаких служебных админ-команд!)
 bot.api.setMyCommands([
-  { command: "start", description: "📁 Каталог и Склад" },
+  { command: "start", description: "📁 Каталог товаров" },
   { command: "cart", description: "🛒 Корзина заказа" },
-  { command: "orders", description: "📋 Мои заказы / Заявки" },
-  { command: "sync", description: "🔄 Синхронизировать склад" },
-  { command: "contacts", description: "🏢 Контакты и время работы" },
-  { command: "profile", description: "👤 Моё имя / профиль" },
-  { command: "admin", description: "⚙️ Управление складом" }
+  { command: "orders", description: "📋 Мои заказы" },
+  { command: "profile", description: "👤 Мой профиль" },
+  { command: "contacts", description: "🏢 Контакты и время работы" }
 ]).catch(() => {});
+
+// Персональное меню с панелью управления — регистрируется ТОЛЬКО в чате владельца
+export function updateAdminCommands(adminId: number) {
+  bot.api.setMyCommands([
+    { command: "start", description: "📁 Каталог и Склад" },
+    { command: "cart", description: "🛒 Корзина заказа" },
+    { command: "orders", description: "📋 Заявки склада" },
+    { command: "admin", description: "⚙️ Панель управления" },
+    { command: "sync", description: "🔄 Синхронизировать Google" }
+  ], {
+    scope: { type: "chat", chat_id: adminId }
+  }).catch(() => {});
+}
+
+// При старте проверяем, известен ли владелец
+const initAdminId = dbService.getAdminId();
+if (initAdminId) {
+  updateAdminCommands(initAdminId);
+}
 
 function isAdmin(ctx: MyContext): boolean {
   const currentAdmin = dbService.getAdminId();

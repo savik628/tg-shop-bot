@@ -4,3 +4,10 @@ dist
 *.db
 *.db-journal
 .DS_Store
+
+# local price lists and generators
+*.xlsx
+*.csv
+scripts_catalog.js
+*.db-wal
+*.db-shm
