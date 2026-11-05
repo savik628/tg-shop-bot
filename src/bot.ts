@@ -1503,11 +1503,67 @@ bot.catch((err) => {
   console.error("Ошибка бота:", err);
 });
 
-// HTTP healthcheck для Render
+// ======================== HTTP СЕРВЕР, ANTI-SLEEP И АВТОВОССТАНОВЛЕНИЕ ========================
+
+function startKeepAliveEngine() {
+  const pingUrl = process.env.RENDER_EXTERNAL_URL || process.env.APP_URL || process.env.PING_URL;
+  if (!pingUrl) {
+    console.log("ℹ️ Keep-Alive: URL не задан. Если вы на Render, добавьте переменную APP_URL со ссылкой на ваш сервис.");
+    return;
+  }
+
+  const target = pingUrl.endsWith("/") ? `${pingUrl}health` : `${pingUrl}/health`;
+  console.log(`⏱ Запущен Anti-Sleep пингер на: ${target} (интервал: каждые 10 минут)`);
+
+  // Пинг каждые 10 минут (Render засыпает через 15 минут)
+  setInterval(async () => {
+    try {
+      const res = await fetch(target);
+      console.log(`[Keep-Alive] Ping: ${res.status} at ${new Date().toLocaleTimeString("ru-RU")}`);
+    } catch (err: any) {
+      console.error("[Keep-Alive] Ошибка ping:", err?.message);
+    }
+  }, 10 * 60 * 1000);
+}
+
+async function autoRestoreFromGoogleSheetsIfEmpty() {
+  try {
+    const stats = dbService.getStats();
+    if (stats.productsCount === 0) {
+      const url = dbService.getGoogleSheetsUrl() || process.env.GOOGLE_SHEETS_URL;
+      if (url) {
+        console.log("🔄 База пуста после перезапуска контейнера. Восстанавливаю склад из Google Таблицы...");
+        const fetchRes = await fetchGoogleSheetsBuffer(url);
+        if (fetchRes.success && fetchRes.buffer) {
+          const parseRes = parseExcelBuffer(fetchRes.buffer);
+          if (parseRes.items.length > 0) {
+            const importRes = importProductsToDb(parseRes.items, "replace_stock");
+            console.log(`✅ Автовосстановление завершено: создано ${importRes.productsCreated} товаров, ${importRes.categoriesCreated} папок!`);
+          }
+        }
+      }
+    }
+  } catch (err: any) {
+    console.error("Ошибка автовосстановления из Google Sheets:", err?.message);
+  }
+}
+
+// HTTP healthcheck для Render и мониторингов
 const PORT = process.env.PORT || 3000;
-const server = http.createServer((_req, res) => {
-  res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
-  res.end("Bot is running!");
+const server = http.createServer((req, res) => {
+  if (req.url === "/health" || req.url === "/ping" || req.url === "/") {
+    const stats = dbService.getStats();
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({
+      status: "ok",
+      uptimeSeconds: Math.floor(process.uptime()),
+      productsCount: stats.productsCount,
+      timestamp: new Date().toISOString()
+    }));
+    return;
+  }
+  res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+  res.end("Not Found");
 });
 server.listen(PORT, () => {
   console.log(`HTTP сервер на порту ${PORT}`);
@@ -1515,7 +1571,9 @@ server.listen(PORT, () => {
 
 console.log("Запуск @LVoptBot...");
 bot.start({
-  onStart: (info) => {
+  onStart: async (info) => {
     console.log(`Бот @${info.username} успешно запущен!`);
+    startKeepAliveEngine();
+    await autoRestoreFromGoogleSheetsIfEmpty();
   }
 });
