@@ -63,11 +63,19 @@ db.exec(`
 // Миграции схемы при обновлении
 try {
   db.exec("ALTER TABLE categories ADD COLUMN parent_id INTEGER DEFAULT NULL REFERENCES categories(id) ON DELETE CASCADE");
-} catch {}
+} catch (e: any) {
+  if (!e?.message?.toLowerCase().includes("duplicate column")) {
+    throw e;
+  }
+}
 
 try {
   db.exec("ALTER TABLE orders ADD COLUMN status TEXT NOT NULL DEFAULT 'new'");
-} catch {}
+} catch (e: any) {
+  if (!e?.message?.toLowerCase().includes("duplicate column")) {
+    throw e;
+  }
+}
 
 // Гарантированное создание структуры категорий по умолчанию
 function ensureDefaultCategories() {
@@ -189,14 +197,6 @@ export const dbService = {
       const val = parseInt(row.value, 10);
       if (val > 0) return val;
     }
-    const envAdmin = process.env.ADMIN_ID;
-    if (envAdmin && parseInt(envAdmin, 10) > 0) {
-      return parseInt(envAdmin, 10);
-    }
-    return null;
-  },
-
-  getEnvAdminId(): number | null {
     const envAdmin = process.env.ADMIN_ID;
     if (envAdmin && parseInt(envAdmin, 10) > 0) {
       return parseInt(envAdmin, 10);

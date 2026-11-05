@@ -167,8 +167,20 @@ export async function checkoutConversation(conversation: MyConversation, ctx: My
         reply_markup: manageKb
       });
     } catch (e: any) {
-      console.error("Не удалось уведомить чат заказов:", e?.message);
+      console.error(`Не удалось уведомить чат заказов для заказа #${result.orderId}:`, e?.message || e);
+      const contacts = dbService.getVenueContacts();
+      await ctx.reply(
+        "⚠️ Заказ сохранён, но менеджер мог не получить уведомление. Пожалуйста, свяжитесь с нами: " +
+          (contacts || "напишите нам в этот чат")
+      );
     }
+  } else {
+    console.error(`Не удалось отправить заказ #${result.orderId}: чат заказов/владелец не настроен`);
+    const contacts = dbService.getVenueContacts();
+    await ctx.reply(
+      "⚠️ Заказ сохранён, но менеджер мог не получить уведомление. Пожалуйста, свяжитесь с нами: " +
+        (contacts || "напишите нам в этот чат")
+    );
   }
 }
 
@@ -351,15 +363,6 @@ export async function addSingleProductConversation(conversation: MyConversation,
   setTimeout(() => ctx.api.deleteMessage(ctx.chat!.id, exitMsg.message_id).catch(() => {}), 2500);
 }
 
-// Заглушки для сохранения совместимости
-export async function addBatchProductsConversation(conversation: MyConversation, ctx: MyContext) {
-  await addSingleProductConversation(conversation, ctx);
-}
-
-export async function renameCategoryConversation(conversation: MyConversation, ctx: MyContext) {
-  // Упрощено: не используется
-}
-
 // Быстрое изменение остатка товара
 export async function updateStockConversation(conversation: MyConversation, ctx: MyContext) {
   const match = ctx.callbackQuery?.data?.match(/^edit_stock_(\d+)$/);
@@ -391,10 +394,6 @@ export async function updateStockConversation(conversation: MyConversation, ctx:
     const errM = await ctx.reply("Введите целое число:");
     toClean.push(errM.message_id);
   }
-}
-
-export async function updatePriceConversation(conversation: MyConversation, ctx: MyContext) {
-  // Упрощено: удаление и добавление
 }
 
 // ======================== СМЕНА ВЛАДЕЛЬЦА ========================

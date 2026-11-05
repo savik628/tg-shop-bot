@@ -1531,9 +1531,9 @@ bot.catch((err) => {
 // ======================== HTTP СЕРВЕР, ANTI-SLEEP И АВТОВОССТАНОВЛЕНИЕ ========================
 
 function startKeepAliveEngine() {
-  const pingUrl = process.env.RENDER_EXTERNAL_URL || process.env.APP_URL || process.env.PING_URL || "https://tg-shop-bot-obnn.onrender.com";
+  const pingUrl = process.env.RENDER_EXTERNAL_URL || process.env.APP_URL || process.env.PING_URL;
   if (!pingUrl) {
-    console.log("ℹ️ Keep-Alive: URL не задан. Если вы на Render, добавьте переменную APP_URL со ссылкой на ваш сервис.");
+    console.log("Keep-alive выключен: переменные RENDER_EXTERNAL_URL, APP_URL или PING_URL не заданы.");
     return;
   }
 
@@ -1543,10 +1543,10 @@ function startKeepAliveEngine() {
   // Пинг каждые 10 минут (Render засыпает через 15 минут)
   setInterval(async () => {
     try {
-      const res = await fetch(target);
+      const res = await fetch(target, { signal: AbortSignal.timeout(10000) });
       console.log(`[Keep-Alive] Ping: ${res.status} at ${new Date().toLocaleTimeString("ru-RU")}`);
     } catch (err: any) {
-      console.error("[Keep-Alive] Ошибка ping:", err?.message);
+      console.error(`[Keep-Alive] Ошибка ping: ${err?.message || err}`);
     }
   }, 10 * 60 * 1000);
 }
