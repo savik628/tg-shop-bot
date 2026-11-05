@@ -1,4 +1,3 @@
-import * as XLSX from "xlsx";
 import { dbService, db } from "./database.js";
 
 export interface ParsedItem {
@@ -51,7 +50,7 @@ function parseStock(raw: any): number {
 }
 
 /** Разбор категории по разделителям (/ > \ |) */
-function parseCategoryPath(rawCat: string, fallbackSheetName: string): string[] {
+function parseCategoryPath(rawCat: string, fallbackSheetName: string = ""): string[] {
   const cat = (rawCat || "").trim();
   if (!cat) {
     // Если колонка категории пуста, используем имя листа (если это не Лист1 / Sheet1)
@@ -70,97 +69,164 @@ function parseCategoryPath(rawCat: string, fallbackSheetName: string): string[] 
 }
 
 /**
- * Парсит буфер Excel файла (.xlsx, .xls, .csv)
+ * Парсер CSV без внешних зависимостей (RFC 4180)
  */
-export function parseExcelBuffer(buffer: Buffer): ParseResult {
-  const workbook = XLSX.read(buffer, { type: "buffer" });
+export function parseCsv(text: string): string[][] {
+  let cleanText = text;
+  if (cleanText.startsWith("\uFEFF")) {
+    cleanText = cleanText.slice(1);
+  }
+
+  const firstLine = cleanText.split(/\r?\n/).find(l => l.trim().length > 0) || "";
+  const delimiter = (firstLine.match(/;/g) || []).length > (firstLine.match(/,/g) || []).length ? ";" : ",";
+
+  const rows: string[][] = [];
+  let currentRow: string[] = [];
+  let currentField = "";
+  let insideQuotes = false;
+
+  for (let i = 0; i < cleanText.length; i++) {
+    const char = cleanText[i];
+
+    if (insideQuotes) {
+      if (char === '"') {
+        if (i + 1 < cleanText.length && cleanText[i + 1] === '"') {
+          currentField += '"';
+          i++;
+        } else {
+          insideQuotes = false;
+        }
+      } else {
+        currentField += char;
+      }
+    } else {
+      if (char === '"') {
+        insideQuotes = true;
+      } else if (char === delimiter) {
+        currentRow.push(currentField);
+        currentField = "";
+      } else if (char === "\r") {
+        if (i + 1 < cleanText.length && cleanText[i + 1] === "\n") {
+          i++;
+        }
+        currentRow.push(currentField);
+        rows.push(currentRow);
+        currentRow = [];
+        currentField = "";
+      } else if (char === "\n") {
+        currentRow.push(currentField);
+        rows.push(currentRow);
+        currentRow = [];
+        currentField = "";
+      } else {
+        currentField += char;
+      }
+    }
+  }
+
+  if (currentRow.length > 0 || currentField !== "") {
+    currentRow.push(currentField);
+    rows.push(currentRow);
+  }
+
+  while (rows.length > 0) {
+    const last = rows[rows.length - 1];
+    if (last.every(cell => !cell || cell.trim() === "")) {
+      rows.pop();
+    } else {
+      break;
+    }
+  }
+
+  return rows;
+}
+
+/**
+ * Парсит буфер CSV файла
+ */
+export function parseCsvBuffer(buffer: Buffer): ParseResult {
   const items: ParsedItem[] = [];
   const errors: string[] = [];
   let totalRows = 0;
 
-  for (const sheetName of workbook.SheetNames) {
-    const sheet = workbook.Sheets[sheetName];
-    if (!sheet) continue;
+  const rows = parseCsv(buffer.toString("utf8"));
+  if (!rows || rows.length < 2) return { items, errors, totalRows };
 
-    // Читаем строки как 2D-массив
-    const rows: any[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
-    if (!rows || rows.length < 2) continue;
+  // Поиск строки заголовков (может быть на 1 или 2 строке)
+  let headerRowIdx = -1;
+  let nameColIdx = -1;
+  let priceColIdx = -1;
+  let stockColIdx = -1;
+  let catColIdx = -1;
 
-    // Поиск строки заголовков (может быть на 1 или 2 строке)
-    let headerRowIdx = -1;
-    let nameColIdx = -1;
-    let priceColIdx = -1;
-    let stockColIdx = -1;
-    let catColIdx = -1;
+  for (let r = 0; r < Math.min(rows.length, 5); r++) {
+    const row = rows[r];
+    if (!Array.isArray(row)) continue;
 
-    for (let r = 0; r < Math.min(rows.length, 5); r++) {
-      const row = rows[r];
-      if (!Array.isArray(row)) continue;
+    for (let c = 0; c < row.length; c++) {
+      const colName = normalizeHeader(String(row[c] || ""));
+      if (!colName) continue;
 
-      for (let c = 0; c < row.length; c++) {
-        const colName = normalizeHeader(String(row[c] || ""));
-        if (!colName) continue;
-
-        if (nameColIdx === -1 && /^(товар|название|наименование|продукт|позиция|номенклатура|name|product|item|title)$/.test(colName)) {
-          nameColIdx = c;
-        } else if (priceColIdx === -1 && /^(цена|стоимость|прайс|price|cost|rate)$/.test(colName)) {
-          priceColIdx = c;
-        } else if (stockColIdx === -1 && /^(количество|колво|остаток|склад|штук|наличие|stock|quantity|qty|count)$/.test(colName)) {
-          stockColIdx = c;
-        } else if (catColIdx === -1 && /^(категория|раздел|папка|группа|подкатегория|category|folder|group)$/.test(colName)) {
-          catColIdx = c;
-        }
-      }
-
-      // Если нашли хотя бы название товара и цену — считаем это строкой заголовков
-      if (nameColIdx !== -1 && priceColIdx !== -1) {
-        headerRowIdx = r;
-        break;
+      if (nameColIdx === -1 && /^(товар|название|наименование|продукт|позиция|номенклатура|name|product|item|title)$/.test(colName)) {
+        nameColIdx = c;
+      } else if (priceColIdx === -1 && /^(цена|стоимость|прайс|price|cost|rate)$/.test(colName)) {
+        priceColIdx = c;
+      } else if (stockColIdx === -1 && /^(количество|колво|остаток|склад|штук|наличие|stock|quantity|qty|count)$/.test(colName)) {
+        stockColIdx = c;
+      } else if (catColIdx === -1 && /^(категория|раздел|папка|группа|подкатегория|category|folder|group)$/.test(colName)) {
+        catColIdx = c;
       }
     }
 
-    if (headerRowIdx === -1) {
-      // Попробуем fallback по порядку: 0: Категория, 1: Товар, 2: Цена, 3: Кол-во
-      if (rows[0] && rows[0].length >= 3) {
-        catColIdx = 0;
-        nameColIdx = 1;
-        priceColIdx = 2;
-        stockColIdx = rows[0].length >= 4 ? 3 : -1;
-        headerRowIdx = 0;
-      } else {
-        continue;
-      }
+    // Если нашли хотя бы название товара и цену — считаем это строкой заголовков
+    if (nameColIdx !== -1 && priceColIdx !== -1) {
+      headerRowIdx = r;
+      break;
     }
+  }
 
-    // Обработка строк с данными
-    for (let r = headerRowIdx + 1; r < rows.length; r++) {
-      const row = rows[r];
-      if (!row || row.length === 0) continue;
-
-      const rawName = nameColIdx >= 0 ? String(row[nameColIdx] || "").trim() : "";
-      if (!rawName) continue; // Пустые строки пропускаем
-
-      totalRows++;
-
-      const rawCat = catColIdx >= 0 ? String(row[catColIdx] || "") : "";
-      const rawPrice = priceColIdx >= 0 ? row[priceColIdx] : 0;
-      const rawStock = stockColIdx >= 0 ? row[stockColIdx] : 0;
-
-      const price = parsePrice(rawPrice);
-      const stock = parseStock(rawStock);
-      const categoryPath = parseCategoryPath(rawCat, sheetName);
-
-      items.push({
-        categoryPath,
-        name: rawName,
-        price,
-        stock
-      });
+  if (headerRowIdx === -1) {
+    // Попробуем fallback по порядку: 0: Категория, 1: Товар, 2: Цена, 3: Кол-во
+    if (rows[0] && rows[0].length >= 3) {
+      catColIdx = 0;
+      nameColIdx = 1;
+      priceColIdx = 2;
+      stockColIdx = rows[0].length >= 4 ? 3 : -1;
+      headerRowIdx = 0;
+    } else {
+      return { items, errors, totalRows };
     }
+  }
+
+  // Обработка строк с данными
+  for (let r = headerRowIdx + 1; r < rows.length; r++) {
+    const row = rows[r];
+    if (!row || row.length === 0) continue;
+
+    const rawName = nameColIdx >= 0 ? String(row[nameColIdx] || "").trim() : "";
+    if (!rawName) continue; // Пустые строки пропускаем
+
+    totalRows++;
+
+    const rawCat = catColIdx >= 0 ? String(row[catColIdx] || "") : "";
+    const rawPrice = priceColIdx >= 0 ? row[priceColIdx] : 0;
+    const rawStock = stockColIdx >= 0 ? row[stockColIdx] : 0;
+
+    const price = parsePrice(rawPrice);
+    const stock = parseStock(rawStock);
+    const categoryPath = parseCategoryPath(rawCat, "");
+
+    items.push({
+      categoryPath,
+      name: rawName,
+      price,
+      stock
+    });
   }
 
   return { items, errors, totalRows };
 }
+
 
 /**
  * Записывает распарсенные товары в базу данных.
@@ -228,7 +294,7 @@ export function importProductsToDb(
 }
 
 /**
- * Создает типовой Excel шаблон с примерами для администратора
+ * Создает типовой CSV шаблон с примерами для администратора
  */
 export function generateExcelTemplate(): Buffer {
   const sampleData = [
@@ -276,18 +342,24 @@ export function generateExcelTemplate(): Buffer {
     }
   ];
 
-  const ws = XLSX.utils.json_to_sheet(sampleData);
+  const headers = ["Категория", "Товар", "Цена (₽)", "Количество (шт.)"];
+  const escapeCsv = (val: any) => {
+    const s = String(val ?? "");
+    if (s.includes(";") || s.includes('"') || s.includes("\n") || s.includes("\r")) {
+      return `"${s.replace(/"/g, '""')}"`;
+    }
+    return s;
+  };
 
-  // Установка удобной ширины колонок
-  ws["!cols"] = [
-    { wch: 28 }, // Категория
-    { wch: 32 }, // Товар
-    { wch: 14 }, // Цена
-    { wch: 18 }  // Количество
+  const rows = [
+    headers.map(escapeCsv).join(";"),
+    ...sampleData.map(item =>
+      headers.map(h => escapeCsv((item as any)[h])).join(";")
+    )
   ];
 
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, "Склад");
-
-  return XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+  const csv = rows.join("\r\n");
+  return Buffer.from("\uFEFF" + csv, "utf8");
 }
+
+export const generateCsvTemplate = generateExcelTemplate;

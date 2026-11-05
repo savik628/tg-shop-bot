@@ -4,7 +4,7 @@ import { activeCategoryMap, activeScreenMessageMap } from "./state.js";
 import { InlineKeyboard, Keyboard } from "grammy";
 import { md } from "./format.js";
 import { fetchGoogleSheetsBuffer } from "./googleSheets.js";
-import { parseExcelBuffer, importProductsToDb } from "./excel.js";
+import { parseCsvBuffer, importProductsToDb } from "./excel.js";
 
 // Утилита очистки временных сообщений
 async function cleanupMessages(ctx: MyContext, ids: number[]) {
@@ -631,7 +631,7 @@ export async function bindGoogleSheetsConversation(conversation: MyConversation,
       continue;
     }
 
-    const parseRes = parseExcelBuffer(fetchRes.buffer);
+    const parseRes = parseCsvBuffer(fetchRes.buffer);
     if (parseRes.items.length === 0) {
       const err = await ctx.reply("❌ В таблице не найдены строки с товарами. Убедитесь, что заполнены колонки `Категория`, `Товар`, `Цена`, `Количество`.\n\nПопробуйте снова или /cancel:");
       toClean.push(err.message_id);

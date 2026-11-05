@@ -8,7 +8,7 @@ import { activeCategoryMap, activeScreenMessageMap } from "./state.js";
 import { md } from "./format.js";
 import {
   generateExcelTemplate,
-  parseExcelBuffer,
+  parseCsvBuffer,
   importProductsToDb,
   ParsedItem
 } from "./excel.js";
@@ -33,7 +33,7 @@ if (!token) {
 
 export const bot = new Bot<MyContext>(token);
 
-// Кэш для подтверждения импорта Excel
+// Кэш для подтверждения импорта CSV
 const pendingExcelImports = new Map<string, { items: ParsedItem[]; filename: string; timestamp: number }>();
 
 bot.use(session({ initial: (): SessionData => ({ targetCategoryId: null }) }));
@@ -215,8 +215,8 @@ async function showAdminPanel(ctx: MyContext) {
   }
   kb.text("📁 + Папки", "admin_create_root_cat").row();
 
-  kb.text("📊 Загрузить Excel", "admin_excel_start")
-    .text("📥 Шаблон Excel", "admin_excel_template").row()
+  kb.text("📊 Загрузить CSV", "admin_excel_start")
+    .text("📥 Шаблон CSV", "admin_excel_template").row()
     .text("👑 Сменить владельца", "admin_transfer_owner").row()
     .text("👤 Режим покупателя", "admin_drop_role").row()
     .text("🔄 Обновить сводку", "admin_refresh").row()
@@ -559,31 +559,31 @@ bot.callbackQuery("admin_refresh", async (ctx) => {
   await showAdminPanel(ctx);
 });
 
-// ======================== ИМПОРТ ИЗ EXCEL ========================
+// ======================== ИМПОРТ ИЗ CSV ========================
 
 async function showExcelImportInfo(ctx: MyContext) {
   if (!isAdmin(ctx)) return;
 
   const text =
-    `📊 **Импорт товаров и категорий из Excel**\n\n` +
-    `Вы можете загрузить весь склад одним файлом формата **.xlsx**, **.xls** или **.csv**.\n\n` +
+    `📊 **Импорт товаров и категорий из CSV**\n\n` +
+    `Вы можете загрузить весь склад одним файлом формата **.csv**.\n\n` +
     `📋 **Требуемые колонки таблицы:**\n` +
     `• **Категория** — папка товара (подпапки через слэш, напр. \`Табак / Darkside\`)\n` +
     `• **Товар** — название товара\n` +
     `• **Цена** — стоимость в рублях\n` +
     `• **Количество** — остаток на складе (шт)\n\n` +
     `📎 **Как загрузить:**\n` +
-    `Просто прикрепите и **отправьте Excel файл документом** в этот чат.\n\n` +
+    `Просто прикрепите и **отправьте CSV файл документом** в этот чат.\n\n` +
     `Если у вас нет готового файла, скачайте наш готовый шаблон:`;
 
   const kb = new InlineKeyboard()
-    .text("📥 Скачать шаблон Excel", "admin_excel_template").row()
+    .text("📥 Скачать шаблон CSV", "admin_excel_template").row()
     .text("◀️ В управление", "admin_main");
 
   await sendOrEditScreen(ctx, text, kb);
 }
 
-bot.command(["excel", "import"], async (ctx) => {
+bot.command(["csv", "excel", "import"], async (ctx) => {
   await deleteUserMessage(ctx);
   await showExcelImportInfo(ctx);
 });
@@ -597,7 +597,7 @@ bot.callbackQuery("admin_excel_template", async (ctx) => {
   await ctx.answerCallbackQuery();
   try {
     const buf = generateExcelTemplate();
-    await ctx.replyWithDocument(new InputFile(buf, "shablon_sklada.xlsx"), {
+    await ctx.replyWithDocument(new InputFile(buf, "shablon_sklada.csv"), {
       caption: "📥 **Шаблон для заполнения склада**\n\nЗаполните строки своими товарами и отправьте файл обратно боту документом.",
       parse_mode: "Markdown"
     });
@@ -610,11 +610,17 @@ bot.on("message:document", async (ctx) => {
   if (!isAdmin(ctx)) return;
 
   const doc = ctx.message.document;
-  const fileName = doc.file_name || "file.xlsx";
-  const isExcel = /\.(xlsx|xls|csv)$/i.test(fileName);
-  if (!isExcel) return;
+  const fileName = doc.file_name || "file.csv";
 
-  const waitMsg = await ctx.reply("⏳ Загружаю и анализирую Excel файл...");
+  if (/\.(xlsx|xls)$/i.test(fileName)) {
+    await ctx.reply("Пришлите прайс в формате CSV: в Excel — Файл → Сохранить как → CSV UTF-8; в Google Таблицах — Файл → Скачать → CSV.");
+    return;
+  }
+
+  const isCsv = /\.csv$/i.test(fileName);
+  if (!isCsv) return;
+
+  const waitMsg = await ctx.reply("⏳ Загружаю и анализирую CSV файл...");
 
   try {
     const file = await ctx.api.getFile(doc.file_id);
@@ -623,14 +629,16 @@ bot.on("message:document", async (ctx) => {
     }
 
     const downloadUrl = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
-    const response = await fetch(downloadUrl);
+    const response = await fetch(downloadUrl, {
+      signal: AbortSignal.timeout(30000)
+    });
     if (!response.ok) {
       throw new Error(`Ошибка загрузки: ${response.statusText}`);
     }
     const arrayBuffer = await response.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
 
-    const parseResult = parseExcelBuffer(buffer);
+    const parseResult = parseCsvBuffer(buffer);
 
     if (parseResult.items.length === 0) {
       await ctx.api.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {});
@@ -656,7 +664,7 @@ bot.on("message:document", async (ctx) => {
 
     const uniqueCats = new Set(parseResult.items.map(i => i.categoryPath.join(" / ")));
 
-    let previewText = `📊 **Анализ Excel: \`${md(fileName)}\`**\n`;
+    let previewText = `📊 **Анализ CSV: \`${md(fileName)}\`**\n`;
     previewText += `━━━━━━━━━━━━━━━━━━━━\n`;
     previewText += `📦 Найдено товаров: **${parseResult.items.length} шт.**\n`;
     previewText += `📁 Папок / категорий: **${uniqueCats.size}**\n\n`;
@@ -685,7 +693,7 @@ bot.on("message:document", async (ctx) => {
     await ctx.reply(previewText, { parse_mode: "Markdown", reply_markup: kb });
   } catch (err: any) {
     await ctx.api.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {});
-    await ctx.reply(`❌ Ошибка обработки Excel файла: ${err?.message || "неизвестная ошибка"}`);
+    await ctx.reply(`❌ Ошибка обработки CSV файла: ${err?.message || "неизвестная ошибка"}`);
   }
 });
 
@@ -710,7 +718,7 @@ bot.callbackQuery(/^excel_run_(add|replace|wipe)_(\w+)$/, async (ctx) => {
   const result = importProductsToDb(pending.items, mode);
   pendingExcelImports.delete(importId);
 
-  let resultText = `✅ **Импорт из Excel успешно завершён!**\n`;
+  let resultText = `✅ **Импорт из CSV успешно завершён!**\n`;
   resultText += `━━━━━━━━━━━━━━━━━━━━\n`;
   resultText += `📁 Создано новых папок: **${result.categoriesCreated}**\n`;
   resultText += `📦 Создано новых товаров: **${result.productsCreated} шт.**\n`;
@@ -802,7 +810,7 @@ async function syncGoogleSheetsAction(ctx: MyContext) {
       return ctx.reply(`❌ **Ошибка загрузки Google Таблицы:**\n\n${fetchRes.error || "сбой соединения"}\n\nПроверьте доступ: «Все, у кого есть ссылка — Читатель».`, { parse_mode: "Markdown" });
     }
 
-    const parseRes = parseExcelBuffer(fetchRes.buffer);
+    const parseRes = parseCsvBuffer(fetchRes.buffer);
     if (parseRes.items.length === 0) {
       await ctx.api.deleteMessage(ctx.chat!.id, waitMsg.message_id).catch(() => {});
       return ctx.reply("❌ В Google Таблице не найдены строки с товарами. Проверьте заголовки колонок: `Категория`, `Товар`, `Цена`, `Количество`.");
@@ -1133,7 +1141,7 @@ async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
       kb.text("📦 + Товар", `admin_add_single_${categoryId}`).row();
     } else {
       kb.text("📁 + Создать папки", "admin_create_root_cat");
-      kb.text("📊 Загрузить Excel", "admin_excel_start").row();
+      kb.text("📊 Загрузить CSV", "admin_excel_start").row();
       const sheetsUrl = dbService.getGoogleSheetsUrl();
       if (sheetsUrl) {
         kb.text("🔄 Синхронизировать с Google", "admin_sheets_quick_sync").row();
@@ -1552,7 +1560,7 @@ async function autoRestoreFromGoogleSheetsIfEmpty() {
         console.log("🔄 База пуста после перезапуска контейнера. Восстанавливаю склад из Google Таблицы...");
         const fetchRes = await fetchGoogleSheetsBuffer(url);
         if (fetchRes.success && fetchRes.buffer) {
-          const parseRes = parseExcelBuffer(fetchRes.buffer);
+          const parseRes = parseCsvBuffer(fetchRes.buffer);
           if (parseRes.items.length > 0) {
             const importRes = importProductsToDb(parseRes.items, "replace_stock");
             console.log(`✅ Автовосстановление завершено: создано ${importRes.productsCreated} товаров, ${importRes.categoriesCreated} папок!`);

@@ -20,8 +20,7 @@
     "@grammyjs/conversations": "^2.0.1",
     "better-sqlite3": "^11.8.1",
     "dotenv": "^16.4.7",
-    "grammy": "^1.35.0",
-    "xlsx": "^0.18.5"
+    "grammy": "^1.35.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",

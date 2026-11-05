@@ -24,7 +24,7 @@ export interface FetchSheetsResult {
 }
 
 /**
- * Скачивает Google Таблицу как бинарный XLSX буфер
+ * Скачивает Google Таблицу как CSV буфер (выгружается первый лист)
  */
 export async function fetchGoogleSheetsBuffer(urlOrId: string): Promise<FetchSheetsResult> {
   const id = extractSpreadsheetId(urlOrId);
@@ -35,7 +35,8 @@ export async function fetchGoogleSheetsBuffer(urlOrId: string): Promise<FetchShe
     };
   }
 
-  const exportUrl = `https://docs.google.com/spreadsheets/d/${id}/export?format=xlsx`;
+  // Экспорт первого листа таблицы в формате CSV
+  const exportUrl = `https://docs.google.com/spreadsheets/d/${id}/export?format=csv`;
 
   try {
     const response = await fetch(exportUrl, {
@@ -43,7 +44,8 @@ export async function fetchGoogleSheetsBuffer(urlOrId: string): Promise<FetchShe
       redirect: "follow",
       headers: {
         "User-Agent": "Mozilla/5.0 (compatible; TelegramShopBot/1.0)"
-      }
+      },
+      signal: AbortSignal.timeout(15000)
     });
 
     if (response.status === 404) {
@@ -62,29 +64,15 @@ export async function fetchGoogleSheetsBuffer(urlOrId: string): Promise<FetchShe
       };
     }
 
-    const contentType = response.headers.get("content-type") || "";
-
-    // Если таблица закрыта приватностью, Google редиректит на HTML-страницу авторизации accounts.google.com
-    if (contentType.includes("text/html")) {
-      const htmlText = await response.text();
-      if (htmlText.includes("accounts.google.com") || htmlText.includes("ServiceLogin") || htmlText.includes("signin")) {
-        return {
-          success: false,
-          spreadsheetId: id,
-          error: "Доступ к таблице ограничен приватностью.\n\n👉 **Как открыть доступ:**\nВ Google Таблице нажмите кнопку «Настройки доступа» (справа вверху) ➔ выберите «Все, у кого есть ссылка» с правами **Читатель**."
-        };
-      }
-    }
-
     const arrayBuffer = await response.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
+    const text = buffer.toString("utf8").trim();
 
-    // Минимальный размер валидного XLSX файла
-    if (buffer.length < 500) {
+    if (buffer.length === 0 || text.startsWith("<")) {
       return {
         success: false,
         spreadsheetId: id,
-        error: "Получен слишком маленький файл, проверьте настройки доступа таблицы."
+        error: "Доступ к таблице ограничен приватностью.\n\n👉 **Как открыть доступ:**\nВ Google Таблице нажмите кнопку «Настройки доступа» (справа вверху) ➔ выберите «Все, у кого есть ссылка» с правами **Читатель**."
       };
     }
 
@@ -94,6 +82,13 @@ export async function fetchGoogleSheetsBuffer(urlOrId: string): Promise<FetchShe
       buffer
     };
   } catch (err: any) {
+    if (err?.name === "TimeoutError") {
+      return {
+        success: false,
+        spreadsheetId: id,
+        error: "Google не ответил за 15 секунд, попробуйте позже."
+      };
+    }
     return {
       success: false,
       spreadsheetId: id,
