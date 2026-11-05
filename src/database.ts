@@ -412,6 +412,18 @@ export const dbService = {
     db.prepare("DELETE FROM cart WHERE user_id = ?").run(userId);
   },
 
+  // Общее количество позиций в корзине пользователя
+  getCartTotalCount(userId: number): number {
+    const row = db.prepare("SELECT IFNULL(SUM(quantity), 0) as count FROM cart WHERE user_id = ?").get(userId) as { count: number } | undefined;
+    return row?.count || 0;
+  },
+
+  // Количество новых необработанных заявок
+  getNewOrdersCount(): number {
+    const row = db.prepare("SELECT COUNT(*) as count FROM orders WHERE status = 'new'").get() as { count: number } | undefined;
+    return row?.count || 0;
+  },
+
   // Заказы и заявки
   getOrders(status?: string): OrderRecord[] {
     if (status) {

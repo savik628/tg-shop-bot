@@ -30,7 +30,7 @@ bot.use(createConversation(addCategoryConversation));
 bot.use(createConversation(addSingleProductConversation));
 bot.use(createConversation(updateStockConversation));
 
-// Регистрация официального меню команд Telegram
+// Официальное меню Telegram
 bot.api.setMyCommands([
   { command: "start", description: "📁 Каталог и Склад" },
   { command: "cart", description: "🛒 Корзина заказа" },
@@ -39,24 +39,31 @@ bot.api.setMyCommands([
   { command: "admin", description: "⚙️ Управление складом" }
 ]).catch(() => {});
 
-// Проверка на админа
 function isAdmin(ctx: MyContext): boolean {
   const currentAdmin = dbService.getAdminId();
   return Boolean(currentAdmin && ctx.from?.id === currentAdmin);
 }
 
-// Постоянная нижняя клавиатура
+// Умная нижняя клавиатура с динамическими бейджами
 function getBottomKeyboard(ctx: MyContext): Keyboard {
-  const venue = dbService.getVenueName();
+  const uid = ctx.from?.id;
+  const isAdm = isAdmin(ctx);
+
+  const cartCount = uid ? dbService.getCartTotalCount(uid) : 0;
+  const cartLabel = cartCount > 0 ? `🛒 Корзина (${cartCount})` : "🛒 Корзина";
+
   const kb = new Keyboard()
     .text("📁 Склад")
-    .text("🛒 Корзина")
+    .text(cartLabel)
     .row();
 
-  if (isAdmin(ctx)) {
-    kb.text("📋 Заявки").text("⚙️ Управление");
+  if (isAdm) {
+    const newOrders = dbService.getNewOrdersCount();
+    const ordersLabel = newOrders > 0 ? `📋 Заявки (${newOrders} 🆕)` : "📋 Заявки";
+    kb.text(ordersLabel).text("⚙️ Управление");
   } else {
-    kb.text("📋 Заявки").text(`🏢 ${venue}`);
+    const venue = dbService.getVenueName();
+    kb.text("📋 Мои заказы").text(`🏢 ${venue}`);
   }
 
   return kb.resized();
@@ -96,15 +103,15 @@ async function showAdminPanel(ctx: MyContext) {
   text += `📢 Чат заказов: **${ordersChat ? `Подключен (${ordersChat})` : "В личку админу"}**\n\n`;
   text += `📊 **Сводка:**\n`;
   text += `• Всего товаров: **${stats.productsCount} шт.**\n`;
-  text += `• Активных заказов: **${stats.ordersCount}**\n`;
-  text += `• Общая выручка: **${stats.totalSales} ₽**\n\n`;
-  text += `_Подключите отдельную группу для заказов командой /set_orders_chat в группе._`;
+  text += `• Заказов: **${stats.ordersCount}**\n`;
+  text += `• Выручка: **${stats.totalSales} ₽**\n\n`;
+  text += `_Для отправки заявок в группу введите /set_orders_chat в группе._`;
 
   const kb = new InlineKeyboard()
     .text("📁 Открыть Склад", "cat_nav_root").row()
     .text("📋 Все заявки склада", "view_orders_all").row()
     .text("📁 + Создать корневые папки", "admin_create_root_cat").row()
-    .text("🔄 Обновить сводку", "admin_refresh").row()
+    .text("🔄 Обновить", "admin_refresh").row()
     .text("◀️ В меню", "menu_main");
 
   if (ctx.callbackQuery) {
@@ -129,9 +136,8 @@ async function showVenueInfo(ctx: MyContext) {
   text += `💨 Премиальный кальянный парк, чаши и табаки.\n`;
   text += `🕒 Время работы: **Ежедневно с 12:00 до 02:00**\n`;
   text += `📍 Самовывоз / Доставка\n\n`;
-  text += `🆔 Ваш Telegram ID: \`${uid}\` (${isAdm ? "**Владелец**" : "Покупатель"})\n`;
   if (isAdm) {
-    text += `\n💡 _Сменить название: /set_venue Новое Название_`;
+    text += `💡 _Сменить название: /set_venue Новое Название_\n`;
   }
 
   const kb = new InlineKeyboard()
@@ -155,7 +161,7 @@ bot.command("start", async (ctx) => {
   await deleteUserMessage(ctx);
   const name = ctx.from?.first_name || "друг";
   const venue = dbService.getVenueName();
-  const text = `👋 Здравствуйте, ${name}!\n\nДобро пожаловать в **${venue}**.\nДля выбора товаров и оформления заявок используйте меню ниже:`;
+  const text = `👋 Здравствуйте, ${name}!\n\nДобро пожаловать в **${venue}**.\nВыберите товары на складе ниже:`;
   await ctx.reply(text, { reply_markup: getBottomKeyboard(ctx) });
   await renderWarehouseView(ctx, null);
 });
@@ -231,7 +237,6 @@ bot.command("reset_admin", async (ctx) => {
   await ctx.reply("🔄 Владелец сброшен! Теперь можно назначить владельца заново командой /claim_admin.");
 });
 
-// Привязка группы заказов
 bot.command("set_orders_chat", async (ctx) => {
   if (!isAdmin(ctx) && ctx.chat?.type === "private") {
     await ctx.reply("❌ Добавьте бота в группу для заказов и выполните команду /set_orders_chat внутри этой группы.");
@@ -246,7 +251,6 @@ bot.command("set_orders_chat", async (ctx) => {
   }
 });
 
-// Смена названия заведения
 bot.command("set_venue", async (ctx) => {
   if (!isAdmin(ctx)) return;
   const newName = ctx.message?.text?.replace("/set_venue", "").trim();
@@ -263,22 +267,22 @@ bot.command("set_venue", async (ctx) => {
 
 // ======================== ОБРАБОТЧИКИ НИЖНИХ КНОПОК ========================
 
-bot.hears(["📁 Склад", "📁 Мой Склад", "🛍 Каталог"], async (ctx) => {
+bot.hears(/^📁\s*(Склад|Мой Склад|Каталог)$/i, async (ctx) => {
   await deleteUserMessage(ctx);
   await renderWarehouseView(ctx, null);
 });
 
-bot.hears(["🛒 Корзина", "🛒 Моя корзина"], async (ctx) => {
+bot.hears(/^🛒\s*Корзина.*$/i, async (ctx) => {
   await deleteUserMessage(ctx);
   await renderCartView(ctx);
 });
 
-bot.hears(["📋 Заявки", "📋 Мои заказы"], async (ctx) => {
+bot.hears(/^📋\s*(Заявки|Мои заказы).*$/i, async (ctx) => {
   await deleteUserMessage(ctx);
   await renderOrdersList(ctx);
 });
 
-bot.hears(["⚙️ Управление", "⚙️ Админ-панель"], async (ctx) => {
+bot.hears(/^⚙️\s*(Управление|Админ-панель).*$/i, async (ctx) => {
   await deleteUserMessage(ctx);
   if (!isAdmin(ctx)) {
     await ctx.reply("❌ Доступ в панель управления запрещен.");
@@ -287,7 +291,6 @@ bot.hears(["⚙️ Управление", "⚙️ Админ-панель"], asy
   await showAdminPanel(ctx);
 });
 
-// Динамическая обработка кнопки заведения
 bot.hears(/^🏢\s*(.*)$/, async (ctx) => {
   await deleteUserMessage(ctx);
   await showVenueInfo(ctx);
@@ -331,7 +334,6 @@ async function renderOrdersList(ctx: MyContext, filterStatus?: string) {
   const kb = new InlineKeyboard();
 
   if (isAdm) {
-    // Фильтры для админа
     kb.text(filterStatus ? "Все" : "• Все •", "orders_filter_all")
       .text(filterStatus === "new" ? "• 🆕 Новые •" : "🆕 Новые", "orders_filter_new")
       .text(filterStatus === "in_progress" ? "• ⏳ В работе •" : "⏳ В работе", "orders_filter_in_progress")
@@ -354,7 +356,6 @@ async function renderOrdersList(ctx: MyContext, filterStatus?: string) {
     return;
   }
 
-  // Список заказов кнопками
   orders.slice(0, 15).forEach((o) => {
     const icon = STATUS_ICONS[o.status] || o.status;
     const title = `#${o.id} | ${o.user_name?.slice(0, 14)} | ${o.total_price} ₽ (${icon})`;
@@ -403,7 +404,6 @@ bot.callbackQuery("user_orders", async (ctx) => {
   await renderOrdersList(ctx);
 });
 
-// Просмотр конкретной заявки
 bot.callbackQuery(/^order_view_(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const orderId = parseInt(ctx.match[1], 10);
@@ -459,7 +459,6 @@ bot.callbackQuery(/^order_view_(\d+)$/, async (ctx) => {
   });
 });
 
-// Смена статуса заявки
 bot.callbackQuery(/^order_status_(\d+)_(in_progress|completed)$/, async (ctx) => {
   if (!isAdmin(ctx)) {
     await ctx.answerCallbackQuery({ text: "Только для администратора!", show_alert: true });
@@ -471,7 +470,6 @@ bot.callbackQuery(/^order_status_(\d+)_(in_progress|completed)$/, async (ctx) =>
   dbService.updateOrderStatus(orderId, status);
   await ctx.answerCallbackQuery({ text: `Статус заявки #${orderId} изменен!` });
 
-  // Уведомим покупателя о смене статуса
   const order = dbService.getOrderById(orderId);
   if (order) {
     const statusText = status === "in_progress"
@@ -482,14 +480,12 @@ bot.callbackQuery(/^order_status_(\d+)_(in_progress|completed)$/, async (ctx) =>
     } catch {}
   }
 
-  // Обновим карточку
   const kb = new InlineKeyboard()
     .text("◀️ К заявкам", "view_orders_all")
     .text("📁 На Склад", "cat_nav_root");
   await ctx.editMessageReplyMarkup({ reply_markup: kb });
 });
 
-// Отмена заявки с авто-возвратом остатков
 bot.callbackQuery(/^order_cancel_(\d+)$/, async (ctx) => {
   if (!isAdmin(ctx)) {
     await ctx.answerCallbackQuery({ text: "Только для администратора!", show_alert: true });
@@ -555,8 +551,11 @@ async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
     }
   }
 
-  // 4. Навигация
-  kb.text("🛒 Корзина", "menu_cart");
+  // 4. Лаконичная навигация
+  const cartCount = userId ? dbService.getCartTotalCount(userId) : 0;
+  const cartLabel = cartCount > 0 ? `🛒 Корзина (${cartCount})` : "🛒 Корзина";
+
+  kb.text(cartLabel, "menu_cart");
   if (categoryId !== null && currentCategory) {
     const backTarget = currentCategory.parent_id !== null ? `cat_nav_${currentCategory.parent_id}` : "cat_nav_root";
     kb.text("◀️ Назад", backTarget);
@@ -564,8 +563,6 @@ async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
       kb.text("🏠 В корень", "cat_nav_root");
     }
     kb.row();
-  } else {
-    kb.text("◀️ В меню", "menu_main").row();
   }
 
   let text = `📍 **${pathTitle}**\n`;
@@ -639,7 +636,7 @@ bot.callbackQuery(/^admin_del_cat_(\d+)$/, async (ctx) => {
   await renderWarehouseView(ctx, parentId);
 });
 
-// ======================== КАРТОЧКА ТОВАРА ========================
+// ======================== КАРТОЧКА ТОВАРА (ВСЕГО 2-3 КНОПКИ) ========================
 
 bot.callbackQuery(/^prod_(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
@@ -665,17 +662,19 @@ bot.callbackQuery(/^prod_(\d+)$/, async (ctx) => {
   text += `📊 На складе: ${stockText}\n`;
 
   const kb = new InlineKeyboard();
+
   if (inStock) {
-    kb.text("🛒 Добавить в корзину (+1)", `cart_add_${product.id}`).row();
+    kb.text("🛒 В корзину (+1)", `cart_add_${product.id}`).row();
   }
 
+  // Для админа — управление
   if (isAdmin(ctx)) {
-    kb.text("✏️ Изменить остаток", `edit_stock_${product.id}`).row();
-    kb.text("🗑 Удалить этот товар", `admin_del_prod_${product.id}`).row();
+    kb.text("✏️ Изменить остаток", `edit_stock_${product.id}`);
+    kb.text("🗑 Удалить", `admin_del_prod_${product.id}`).row();
   }
 
-  kb.text("🛒 В корзину", "menu_cart");
-  kb.text("◀️ Назад в папку", `cat_nav_${product.category_id}`).row();
+  // Назад строго в папку товара
+  kb.text("◀️ Назад", `cat_nav_${product.category_id}`);
 
   await ctx.editMessageText(text, {
     parse_mode: "Markdown",
@@ -705,11 +704,11 @@ bot.callbackQuery(/^cart_add_(\d+)$/, async (ctx) => {
       kb.text("➕ Добавить ещё (+1)", `cart_add_${product.id}`).row();
     }
     if (isAdmin(ctx)) {
-      kb.text("✏️ Изменить остаток", `edit_stock_${product.id}`).row();
-      kb.text("🗑 Удалить этот товар", `admin_del_prod_${product.id}`).row();
+      kb.text("✏️ Изменить остаток", `edit_stock_${product.id}`);
+      kb.text("🗑 Удалить", `admin_del_prod_${product.id}`).row();
     }
-    kb.text("🛒 В корзину", "menu_cart");
-    kb.text("◀️ Назад в папку", `cat_nav_${product.category_id}`).row();
+    kb.text("🛒 Открыть корзину", "menu_cart");
+    kb.text("◀️ Назад", `cat_nav_${product.category_id}`);
 
     try {
       await ctx.editMessageReplyMarkup({ reply_markup: kb });
@@ -745,9 +744,7 @@ async function renderCartView(ctx: MyContext) {
 
   if (cart.length === 0) {
     const kb = new InlineKeyboard()
-      .text("📁 Открыть Склад", "cat_nav_root")
-      .row()
-      .text("◀️ В меню", "menu_main");
+      .text("📁 Открыть Склад", "cat_nav_root");
 
     const emptyText = "🛒 **Ваша корзина пуста.**\n\nВыберите товары на складе, чтобы сформировать заявку.";
     if (ctx.callbackQuery) {
@@ -767,7 +764,7 @@ async function renderCartView(ctx: MyContext) {
   cart.forEach((item) => {
     const subtotal = item.quantity * item.price;
     total += subtotal;
-    text += `• **${item.name}**\n  ${item.quantity} шт. × ${item.price} ₽ = **${subtotal} ₽** (на складе: ${item.stock} шт.)\n\n`;
+    text += `• **${item.name}**\n  ${item.quantity} шт. × ${item.price} ₽ = **${subtotal} ₽**\n\n`;
 
     kb.text(`➖`, `cart_decr_${item.product_id}`)
       .text(`${item.quantity} шт.`, `cart_qty_info`)
@@ -776,12 +773,11 @@ async function renderCartView(ctx: MyContext) {
       .row();
   });
 
-  text += `💰 **ИТОГО К ОПЛАТЕ:** **${total} ₽**`;
+  text += `💰 **ИТОГО:** **${total} ₽**`;
 
   kb.text("✅ Оформить заявку", "cart_checkout").row();
-  kb.text("🗑 Очистить корзину", "cart_clear").row();
-  kb.text("📁 Продолжить выбор", "cat_nav_root").row();
-  kb.text("◀️ В меню", "menu_main");
+  kb.text("📁 Продолжить покупки", "cat_nav_root");
+  kb.text("🗑 Очистить", "cart_clear").row();
 
   if (ctx.callbackQuery) {
     try {
@@ -858,7 +854,7 @@ bot.catch((err) => {
   console.error("Ошибка бота:", err);
 });
 
-// HTTP сервер для healthcheck Render
+// HTTP healthcheck для Render
 const PORT = process.env.PORT || 3000;
 const server = http.createServer((_req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
