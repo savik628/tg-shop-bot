@@ -549,6 +549,16 @@ export const dbService = {
     db.prepare("DELETE FROM cart WHERE user_id = ?").run(userId);
   },
 
+  // Карта количества товаров в корзине: productId -> quantity
+  getCartItemsMap(userId: number): Map<number, number> {
+    const rows = db.prepare("SELECT product_id, quantity FROM cart WHERE user_id = ?").all(userId) as { product_id: number; quantity: number }[];
+    const map = new Map<number, number>();
+    for (const r of rows) {
+      map.set(r.product_id, r.quantity);
+    }
+    return map;
+  },
+
   // Общее количество позиций в корзине пользователя
   getCartTotalCount(userId: number): number {
     const row = db.prepare("SELECT IFNULL(SUM(quantity), 0) as count FROM cart WHERE user_id = ?").get(userId) as { count: number } | undefined;

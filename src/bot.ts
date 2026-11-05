@@ -3,7 +3,7 @@ import { conversations, createConversation } from "@grammyjs/conversations";
 import dotenv from "dotenv";
 import http from "node:http";
 import { MyContext, SessionData } from "./types.js";
-import { dbService, OrderRecord, OrderItem } from "./database.js";
+import { dbService, OrderRecord, OrderItem, Product } from "./database.js";
 import { activeCategoryMap } from "./state.js";
 import { md } from "./format.js";
 import {
@@ -1081,6 +1081,8 @@ async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
   const currentCategory = categoryId !== null ? dbService.getCategoryById(categoryId) : null;
   const pathTitle = dbService.getCategoryPathString(categoryId);
 
+  const cartMap = userId ? dbService.getCartItemsMap(userId) : new Map<number, number>();
+
   const kb = new InlineKeyboard();
 
   // 1. Папки
@@ -1091,10 +1093,21 @@ async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
   });
   if (subcategories.length % 2 !== 0) kb.row();
 
-  // 2. Товары
+  // 2. Товары: для покупателя мгновенный выбор с бейджем количества, для админа статус
   products.forEach((p) => {
-    const status = p.stock > 0 ? `${p.price} ₽ | ${p.stock} шт.` : "❌ Нет";
-    kb.text(`📦 ${p.name} — ${status}`, `prod_${p.id}`).row();
+    if (isAdm) {
+      const status = p.stock > 0 ? `${p.price} ₽ | ${p.stock} шт.` : "❌ Нет";
+      kb.text(`📦 ${p.name} — ${status}`, `prod_${p.id}`).row();
+    } else {
+      const inCartQty = cartMap.get(p.id) || 0;
+      if (p.stock <= 0) {
+        kb.text(`❌ ${p.name} — Нет в наличии`, `prod_${p.id}`).row();
+      } else if (inCartQty > 0) {
+        kb.text(`🛒 ${inCartQty} шт. | ${p.name} — ${p.price} ₽`, `prod_${p.id}`).row();
+      } else {
+        kb.text(`📦 ${p.name} — ${p.price} ₽`, `prod_${p.id}`).row();
+      }
+    }
   });
 
   // 3. Только 2 главные кнопки для админа
@@ -1112,15 +1125,16 @@ async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
     }
   }
 
-  // 4. Лаконичная навигация
+  // 4. Минималистичная навигация (Назад и Корзина)
   const cartCount = userId ? dbService.getCartTotalCount(userId) : 0;
   const cartLabel = cartCount > 0 ? `🛒 Корзина (${cartCount})` : "🛒 Корзина";
 
-  kb.text(cartLabel, "menu_cart");
   if (categoryId !== null && currentCategory) {
     const backTarget = currentCategory.parent_id !== null ? `cat_nav_${currentCategory.parent_id}` : "cat_nav_root";
     kb.text("◀️ Назад", backTarget);
-    kb.row();
+    kb.text(cartLabel, "menu_cart").row();
+  } else {
+    kb.text(cartLabel, "menu_cart").row();
   }
 
   if (isAdm && categoryId !== null) {
@@ -1222,18 +1236,9 @@ bot.callbackQuery(/^admin_del_cat_yes_(\d+)$/, async (ctx) => {
   await renderWarehouseView(ctx, parentId);
 });
 
-// ======================== КАРТОЧКА ТОВАРА (ВСЕГО 2-3 КНОПКИ) ========================
+// ======================== КАРТОЧКА ТОВАРА И 1-CLICK ДОБАВЛЕНИЕ ========================
 
-bot.callbackQuery(/^prod_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  const productId = parseInt(ctx.match[1], 10);
-  const product = dbService.getProductById(productId);
-
-  if (!product) {
-    await ctx.editMessageText("Товар не найден.", { reply_markup: getMainMenu(ctx) });
-    return;
-  }
-
+async function renderProductAdminCard(ctx: MyContext, product: Product) {
   const inStock = product.stock > 0;
   const stockText = inStock ? `🟢 В наличии: **${product.stock} шт.**` : "🔴 **Нет в наличии**";
   const pathStr = dbService.getCategoryPathString(product.category_id);
@@ -1248,24 +1253,65 @@ bot.callbackQuery(/^prod_(\d+)$/, async (ctx) => {
   text += `📊 На складе: ${stockText}\n`;
 
   const kb = new InlineKeyboard();
-
   if (inStock) {
     kb.text("🛒 В корзину (+1)", `cart_add_${product.id}`).row();
   }
+  kb.text("✏️ Изменить остаток", `edit_stock_${product.id}`);
+  kb.text("🗑 Удалить", `admin_del_prod_${product.id}`).row();
+  kb.text("◀️ Назад в папку", `cat_nav_${product.category_id}`);
 
-  // Для админа — управление
-  if (isAdmin(ctx)) {
-    kb.text("✏️ Изменить остаток", `edit_stock_${product.id}`);
-    kb.text("🗑 Удалить", `admin_del_prod_${product.id}`).row();
+  if (ctx.callbackQuery) {
+    try {
+      await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb });
+    } catch {
+      await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
+    }
+  } else {
+    await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
+  }
+}
+
+bot.callbackQuery(/^prod_(\d+)$/, async (ctx) => {
+  const productId = parseInt(ctx.match[1], 10);
+  const product = dbService.getProductById(productId);
+
+  if (!product) {
+    await ctx.answerCallbackQuery({ text: "Товар не найден", show_alert: true });
+    return;
   }
 
-  // Назад строго в папку товара
-  kb.text("◀️ Назад", `cat_nav_${product.category_id}`);
+  // Для администратора — карточка управления остатком и удалением
+  if (isAdmin(ctx)) {
+    await ctx.answerCallbackQuery();
+    await renderProductAdminCard(ctx, product);
+    return;
+  }
 
-  await ctx.editMessageText(text, {
-    parse_mode: "Markdown",
-    reply_markup: kb
+  // Для покупателя — моментальное добавление в корзину (1 клик)
+  const userId = ctx.from?.id;
+  if (!userId) return;
+
+  if (product.stock <= 0) {
+    await ctx.answerCallbackQuery({ text: "❌ Товар закончился на складе", show_alert: true });
+    return;
+  }
+
+  const result = dbService.addToCart(userId, productId, 1);
+  if (!result.success) {
+    await ctx.answerCallbackQuery({ text: `❌ ${result.error}`, show_alert: true });
+    return;
+  }
+
+  const cartMap = dbService.getCartItemsMap(userId);
+  const currentQty = cartMap.get(productId) || 1;
+  const totalCart = dbService.getCartTotalCount(userId);
+
+  await ctx.answerCallbackQuery({
+    text: `🛒 ${product.name}: ${currentQty} шт. (всего ${totalCart} шт.)`
   });
+
+  // Моментально обновляем склад на месте (появляется бейдж "🛒 X шт.")
+  await renderWarehouseView(ctx, product.category_id);
 });
 
 bot.callbackQuery(/^cart_add_(\d+)$/, async (ctx) => {
@@ -1364,8 +1410,11 @@ async function renderCartView(ctx: MyContext) {
 
   text += `💰 **ИТОГО:** **${total} ₽**`;
 
+  const lastCatId = userId ? activeCategoryMap.get(userId) : null;
+  const backShopTarget = lastCatId ? `cat_nav_${lastCatId}` : "cat_nav_root";
+
   kb.text("✅ Оформить заявку", "cart_checkout").row();
-  kb.text("📁 Продолжить покупки", "cat_nav_root");
+  kb.text("📁 Продолжить покупки", backShopTarget);
   kb.text("🗑 Очистить", "cart_clear").row();
 
   if (ctx.callbackQuery) {
