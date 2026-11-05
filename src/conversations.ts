@@ -1,5 +1,6 @@
 import { MyConversation, MyContext } from "./types.js";
 import { dbService } from "./database.js";
+import { activeCategoryMap } from "./state.js";
 import { InlineKeyboard, Keyboard } from "grammy";
 
 // Утилита очистки временных сообщений
@@ -144,7 +145,8 @@ export async function checkoutConversation(conversation: MyConversation, ctx: My
 
 // ======================== ПОТОКОВОЕ СОЗДАНИЕ ПАПОК ========================
 export async function addCategoryConversation(conversation: MyConversation, ctx: MyContext) {
-  const parentId = (ctx as any).session?.targetCategoryId ?? null;
+  const userId = ctx.from?.id;
+  const parentId = userId ? (activeCategoryMap.get(userId) ?? null) : null;
   const currentPath = dbService.getCategoryPathString(parentId);
   const toClean: number[] = [];
 
@@ -206,9 +208,13 @@ export async function addCategoryConversation(conversation: MyConversation, ctx:
 
 // ======================== ПОТОКОВОЕ ДОБАВЛЕНИЕ ТОВАРОВ (ЧЕРЕЗ ПРОБЕЛ) ========================
 export async function addSingleProductConversation(conversation: MyConversation, ctx: MyContext) {
-  const categoryId = (ctx as any).session?.targetCategoryId;
+  const userId = ctx.from?.id;
+  const categoryId = userId ? activeCategoryMap.get(userId) : null;
+
   if (!categoryId) {
-    await ctx.reply("❌ Папка не выбрана.");
+    await ctx.reply("❌ Сначала откройте папку, в которую хотите добавить товары (например: «Табак ➔ Мастхэв»), и нажмите кнопку «📦 + Товар».", {
+      reply_markup: new InlineKeyboard().text("📁 Открыть Мой Склад", "cat_nav_root")
+    });
     return;
   }
 

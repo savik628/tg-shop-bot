@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import http from "node:http";
 import { MyContext, SessionData } from "./types.js";
 import { dbService } from "./database.js";
+import { activeCategoryMap } from "./state.js";
 import {
   checkoutConversation,
   addCategoryConversation,
@@ -228,6 +229,9 @@ bot.callbackQuery("admin_refresh", async (ctx) => {
 
 async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
   const isAdm = isAdmin(ctx);
+  const userId = ctx.from?.id;
+  if (userId) activeCategoryMap.set(userId, categoryId);
+
   const subcategories = dbService.getCategoriesWithStats(categoryId);
   const products = categoryId !== null ? dbService.getProductsByCategory(categoryId) : [];
   const currentCategory = categoryId !== null ? dbService.getCategoryById(categoryId) : null;
@@ -311,7 +315,8 @@ bot.callbackQuery(/^cat_nav_(\d+)$/, async (ctx) => {
 bot.callbackQuery("admin_create_root_cat", async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!isAdmin(ctx)) return;
-  (ctx.session as any).targetCategoryId = null;
+  const userId = ctx.from?.id;
+  if (userId) activeCategoryMap.set(userId, null);
   await ctx.conversation.enter("addCategoryConversation");
 });
 
@@ -320,16 +325,18 @@ bot.callbackQuery(/^admin_add_subcat_(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!isAdmin(ctx)) return;
   const parentId = parseInt(ctx.match[1], 10);
-  (ctx.session as any).targetCategoryId = parentId;
+  const userId = ctx.from?.id;
+  if (userId) activeCategoryMap.set(userId, parentId);
   await ctx.conversation.enter("addCategoryConversation");
 });
 
-// Потоковое добавление товаров
+// Потоковое добавление товаров в открытую папку
 bot.callbackQuery(/^admin_add_single_(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!isAdmin(ctx)) return;
   const catId = parseInt(ctx.match[1], 10);
-  (ctx.session as any).targetCategoryId = catId;
+  const userId = ctx.from?.id;
+  if (userId) activeCategoryMap.set(userId, catId);
   await ctx.conversation.enter("addSingleProductConversation");
 });
 
