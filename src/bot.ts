@@ -9,7 +9,8 @@ import {
   checkoutConversation,
   addCategoryConversation,
   addSingleProductConversation,
-  updateStockConversation
+  updateStockConversation,
+  transferOwnerConversation
 } from "./conversations.js";
 
 dotenv.config();
@@ -29,6 +30,7 @@ bot.use(createConversation(checkoutConversation));
 bot.use(createConversation(addCategoryConversation));
 bot.use(createConversation(addSingleProductConversation));
 bot.use(createConversation(updateStockConversation));
+bot.use(createConversation(transferOwnerConversation));
 
 // Официальное меню Telegram
 bot.api.setMyCommands([
@@ -111,6 +113,7 @@ async function showAdminPanel(ctx: MyContext) {
     .text("📁 Открыть Склад", "cat_nav_root").row()
     .text("📋 Все заявки склада", "view_orders_all").row()
     .text("📁 + Создать корневые папки", "admin_create_root_cat").row()
+    .text("👑 Сменить владельца", "admin_transfer_owner").row()
     .text("🔄 Обновить", "admin_refresh").row()
     .text("◀️ В меню", "menu_main");
 
@@ -187,11 +190,18 @@ bot.command("admin", async (ctx) => {
   if (!uid) return;
 
   const currentAdmin = dbService.getAdminId();
-  if (!currentAdmin || currentAdmin !== uid) {
+  if (!currentAdmin) {
     const kb = new InlineKeyboard().text("👑 Назначить меня владельцем бота", "claim_admin_click");
-    await ctx.reply(`⚙️ **Доступ к панели управления**\n\nТекущий владелец: \`${currentAdmin || "не назначен"}\`\nВаш ID: \`${uid}\`\n\nНажмите кнопку ниже, чтобы стать владельцем:`, {
+    await ctx.reply(`⚙️ **Доступ к панели управления**\n\nВладелец ещё не назначен.\nВаш ID: \`${uid}\`\n\nНажмите кнопку ниже, чтобы стать владельцем:`, {
       parse_mode: "Markdown",
       reply_markup: kb
+    });
+    return;
+  }
+
+  if (currentAdmin !== uid) {
+    await ctx.reply(`❌ **Доступ ограничен**\n\nПанель управления доступна только владельцу бота.\nВаш ID: \`${uid}\``, {
+      parse_mode: "Markdown"
     });
     return;
   }
@@ -199,14 +209,57 @@ bot.command("admin", async (ctx) => {
   await showAdminPanel(ctx);
 });
 
+bot.callbackQuery("admin_transfer_owner", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isAdmin(ctx)) {
+    return ctx.reply("❌ Доступно только владельцу.");
+  }
+  await ctx.conversation.enter("transferOwnerConversation");
+});
+
+bot.command("transfer_owner", async (ctx) => {
+  await deleteUserMessage(ctx);
+  if (!isAdmin(ctx)) {
+    await ctx.reply("❌ Команда доступна только текущему владельцу.");
+    return;
+  }
+  const arg = ctx.message?.text?.split(" ")[1]?.trim();
+  if (arg) {
+    const targetId = parseInt(arg, 10);
+    if (!isNaN(targetId) && targetId > 0) {
+      if (targetId === ctx.from?.id) {
+        await ctx.reply("⚠️ Вы уже являетесь владельцем.");
+        return;
+      }
+      dbService.setAdminId(targetId);
+      await ctx.reply(`🎉 **Права владельца переданы пользователю ID:** \`${targetId}\``, {
+        parse_mode: "Markdown",
+        reply_markup: getBottomKeyboard(ctx)
+      });
+      try {
+        await ctx.api.sendMessage(targetId, "👑 Вам переданы права владельца склада! Для входа в панель введите /admin.");
+      } catch {}
+      return;
+    }
+  }
+  await ctx.conversation.enter("transferOwnerConversation");
+});
+
 bot.callbackQuery("claim_admin_click", async (ctx) => {
   const uid = ctx.from?.id;
   if (!uid) return;
 
+  const currentAdmin = dbService.getAdminId();
+  if (currentAdmin && currentAdmin !== uid) {
+    await ctx.answerCallbackQuery({ text: "Владелец уже назначен!" });
+    await ctx.reply("❌ Владелец уже назначен. Сменить владельца может только действующий администратор.");
+    return;
+  }
+
   dbService.setAdminId(uid);
   await ctx.answerCallbackQuery({ text: "Вы назначены владельцем!" });
   await ctx.reply(
-    `🎉 **Владелец бота успешно обновлен!**\n\n🆔 Ваш Telegram ID: \`${uid}\`\nВам доступен полный контроль над складом и заказами.\n\n💡 _Чтобы права не сбрасывались при обновлении Render, добавьте в Render (Environment):_\n\`ADMIN_ID=${uid}\``,
+    `🎉 **Владелец бота успешно обновлен!**\n\n🆔 Ваш Telegram ID: \`${uid}\`\nВам доступен полный контроль над складом и заказами.\n\n💡 _Чтобы права не сбрасывались при перезапуске Render, добавьте в Render (Environment):_\n\`ADMIN_ID=${uid}\``,
     {
       parse_mode: "Markdown",
       reply_markup: getBottomKeyboard(ctx)
@@ -219,6 +272,12 @@ bot.command("claim_admin", async (ctx) => {
   await deleteUserMessage(ctx);
   const uid = ctx.from?.id;
   if (!uid) return;
+
+  const currentAdmin = dbService.getAdminId();
+  if (currentAdmin && currentAdmin !== uid) {
+    await ctx.reply("❌ Владелец уже назначен. Передать права можно только через панель владельца или команду /transfer_owner.");
+    return;
+  }
 
   dbService.setAdminId(uid);
   await ctx.reply(

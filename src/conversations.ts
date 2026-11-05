@@ -388,3 +388,123 @@ export async function updateStockConversation(conversation: MyConversation, ctx:
 export async function updatePriceConversation(conversation: MyConversation, ctx: MyContext) {
   // Упрощено: удаление и добавление
 }
+
+// ======================== СМЕНА ВЛАДЕЛЬЦА ========================
+export async function transferOwnerConversation(conversation: MyConversation, ctx: MyContext) {
+  const currentAdmin = dbService.getAdminId();
+  if (!currentAdmin || ctx.from?.id !== currentAdmin) {
+    await ctx.reply("❌ Доступно только действующему владельцу.");
+    return;
+  }
+
+  const toClean: number[] = [];
+  const kbCancel = new InlineKeyboard().text("❌ Отмена", "cancel_transfer");
+
+  const q = await ctx.reply(
+    `👑 **Смена владельца бота**\n\n` +
+    `Текущий владелец: \`${currentAdmin}\`\n\n` +
+    `Отправьте **Telegram ID** нового владельца (только цифры) или перешлите любое сообщение от него.\n\n` +
+    `_Для отмены отправьте /cancel или нажмите кнопку:_`,
+    { parse_mode: "Markdown", reply_markup: kbCancel }
+  );
+  toClean.push(q.message_id);
+
+  let targetId: number | null = null;
+
+  while (true) {
+    const res = await conversation.wait();
+
+    if (res.callbackQuery?.data === "cancel_transfer") {
+      await res.answerCallbackQuery().catch(() => {});
+      await cleanupMessages(ctx, toClean);
+      const m = await ctx.reply("❌ Смена владельца отменена.");
+      setTimeout(() => ctx.api.deleteMessage(ctx.chat!.id, m.message_id).catch(() => {}), 3000);
+      return;
+    }
+
+    if (res.message?.message_id) {
+      toClean.push(res.message.message_id);
+    }
+
+    if (res.message?.text === "/cancel" || res.message?.text === "❌ Отмена") {
+      await cleanupMessages(ctx, toClean);
+      const m = await ctx.reply("❌ Смена владельца отменена.");
+      setTimeout(() => ctx.api.deleteMessage(ctx.chat!.id, m.message_id).catch(() => {}), 3000);
+      return;
+    }
+
+    // Проверка пересланного сообщения
+    const forwardOrigin = (res.message as any)?.forward_origin;
+    if (forwardOrigin?.type === "user" && forwardOrigin.sender_user?.id) {
+      targetId = forwardOrigin.sender_user.id;
+    } else if ((res.message as any)?.forward_from?.id) {
+      targetId = (res.message as any).forward_from.id;
+    } else if (res.message?.text) {
+      const parsed = parseInt(res.message.text.trim(), 10);
+      if (!isNaN(parsed) && parsed > 0) {
+        targetId = parsed;
+      }
+    }
+
+    if (targetId) {
+      if (targetId === currentAdmin) {
+        const err = await ctx.reply("⚠️ Этот пользователь уже является владельцем. Введите другой ID:");
+        toClean.push(err.message_id);
+        targetId = null;
+        continue;
+      }
+      break;
+    }
+
+    const err = await ctx.reply("⚠️ Не удалось распознать ID. Отправьте числовой Telegram ID (например `123456789`) или перешлите сообщение пользователя:");
+    toClean.push(err.message_id);
+  }
+
+  // Запрос подтверждения
+  const confirmKb = new InlineKeyboard()
+    .text("✅ Да, передать права", `confirm_transfer_${targetId}`)
+    .text("❌ Отмена", "cancel_transfer");
+
+  const confirmMsg = await ctx.reply(
+    `⚠️ **Подтверждение передачи прав**\n\n` +
+    `Вы собираетесь передать права владельца пользователю с ID:\n` +
+    `🆔 **${targetId}**\n\n` +
+    `❗️ **Внимание:** После подтверждения вы потеряете доступ к панели управления.\n\n` +
+    `Передать права?`,
+    { parse_mode: "Markdown", reply_markup: confirmKb }
+  );
+  toClean.push(confirmMsg.message_id);
+
+  while (true) {
+    const nextRes = await conversation.wait();
+
+    if (nextRes.callbackQuery?.data === `confirm_transfer_${targetId}`) {
+      await nextRes.answerCallbackQuery().catch(() => {});
+      await conversation.external(() => dbService.setAdminId(targetId!));
+      await cleanupMessages(ctx, toClean);
+
+      await ctx.reply(
+        `🎉 **Права владельца успешно переданы!**\n\nНовый владелец: \`${targetId}\`\nВаша панель управления деактивирована.`,
+        { parse_mode: "Markdown" }
+      );
+
+      // Оповещение новому владельцу
+      try {
+        await ctx.api.sendMessage(
+          targetId,
+          `👑 **Поздравляем!**\n\nВам были переданы права владельца бота.\nДля открытия панели управления нажмите /admin или /start.`
+        );
+      } catch {}
+
+      return;
+    }
+
+    if (nextRes.callbackQuery?.data === "cancel_transfer" || nextRes.message?.text === "/cancel") {
+      await nextRes.answerCallbackQuery().catch(() => {});
+      await cleanupMessages(ctx, toClean);
+      const m = await ctx.reply("❌ Передача прав отменена.");
+      setTimeout(() => ctx.api.deleteMessage(ctx.chat!.id, m.message_id).catch(() => {}), 3000);
+      return;
+    }
+  }
+}

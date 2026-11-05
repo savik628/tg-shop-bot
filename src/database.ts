@@ -175,13 +175,13 @@ export interface OrderRecord {
 export const dbService = {
   // Настройки (Admin ID)
   getAdminId(): number | null {
-    const envAdmin = process.env.ADMIN_ID;
-    if (envAdmin && parseInt(envAdmin, 10) > 0) {
-      return parseInt(envAdmin, 10);
-    }
     const row = db.prepare("SELECT value FROM settings WHERE key = 'admin_id'").get() as { value: string } | undefined;
     if (row && parseInt(row.value, 10) > 0) {
       return parseInt(row.value, 10);
+    }
+    const envAdmin = process.env.ADMIN_ID;
+    if (envAdmin && parseInt(envAdmin, 10) > 0) {
+      return parseInt(envAdmin, 10);
     }
     return null;
   },
