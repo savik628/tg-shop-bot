@@ -1,7 +1,10 @@
+import "dotenv/config";
 import Database from "better-sqlite3";
 import path from "node:path";
+import fs from "node:fs";
 
-const dbPath = path.resolve(process.cwd(), "shop.db");
+const dbPath = process.env.DB_PATH || path.resolve(process.cwd(), "shop.db");
+fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 export const db = new Database(dbPath);
 
 db.pragma("journal_mode = WAL");
@@ -184,8 +187,16 @@ export const dbService = {
     const row = db.prepare("SELECT value FROM settings WHERE key = 'admin_id'").get() as { value: string } | undefined;
     if (row) {
       const val = parseInt(row.value, 10);
-      return val > 0 ? val : null;
+      if (val > 0) return val;
     }
+    const envAdmin = process.env.ADMIN_ID;
+    if (envAdmin && parseInt(envAdmin, 10) > 0) {
+      return parseInt(envAdmin, 10);
+    }
+    return null;
+  },
+
+  getEnvAdminId(): number | null {
     const envAdmin = process.env.ADMIN_ID;
     if (envAdmin && parseInt(envAdmin, 10) > 0) {
       return parseInt(envAdmin, 10);
@@ -201,12 +212,17 @@ export const dbService = {
     `).run(id.toString());
   },
 
-  clearAdminId(): void {
+  isBuyerMode(userId: number): boolean {
+    const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(`buyer_mode_${userId}`) as { value: string } | undefined;
+    return row?.value === '1';
+  },
+
+  setBuyerMode(userId: number, on: boolean): void {
     db.prepare(`
       INSERT INTO settings (key, value)
-      VALUES ('admin_id', '0')
-      ON CONFLICT(key) DO UPDATE SET value = '0'
-    `).run();
+      VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(`buyer_mode_${userId}`, on ? '1' : '0');
   },
 
   // Отдельная группа для заявок (ORDERS_CHAT_ID)
@@ -242,6 +258,19 @@ export const dbService = {
       VALUES ('venue_name', ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
     `).run(name.trim());
+  },
+
+  getVenueContacts(): string {
+    const row = db.prepare("SELECT value FROM settings WHERE key = 'venue_contacts'").get() as { value: string } | undefined;
+    return row?.value || process.env.VENUE_CONTACTS || "";
+  },
+
+  setVenueContacts(text: string): void {
+    db.prepare(`
+      INSERT INTO settings (key, value)
+      VALUES ('venue_contacts', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(text.trim());
   },
 
   // Профиль покупателя (имя / заведение)
@@ -332,6 +361,27 @@ export const dbService = {
       deleteRecursively(id);
     });
     tx();
+  },
+
+  countProductsInSubtree(categoryId: number, onlyInStock: boolean = true): number {
+    const condition = onlyInStock ? "WHERE p.stock > 0" : "";
+    const stmt = db.prepare(`
+      WITH RECURSIVE subtree AS (
+        SELECT id FROM categories WHERE id = ?
+        UNION ALL
+        SELECT c.id FROM categories c JOIN subtree s ON c.parent_id = s.id
+      )
+      SELECT COUNT(*) as count
+      FROM products p
+      JOIN subtree s ON p.category_id = s.id
+      ${condition}
+    `);
+    const row = stmt.get(categoryId) as { count: number } | undefined;
+    return row?.count || 0;
+  },
+
+  countAllProductsInSubtree(categoryId: number): number {
+    return this.countProductsInSubtree(categoryId, false);
   },
 
   // Товары

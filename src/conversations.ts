@@ -2,6 +2,7 @@ import { MyConversation, MyContext } from "./types.js";
 import { dbService } from "./database.js";
 import { activeCategoryMap } from "./state.js";
 import { InlineKeyboard, Keyboard } from "grammy";
+import { md } from "./format.js";
 
 // Утилита очистки временных сообщений
 async function cleanupMessages(ctx: MyContext, ids: number[]) {
@@ -114,9 +115,9 @@ export async function checkoutConversation(conversation: MyConversation, ctx: My
   // Компактное подтверждение покупателю без спама
   let userSummary = `✅ **Заявка #${result.orderId} принята!**\n\n`;
   userSummary += `💰 Сумма к оплате: **${result.total} ₽**\n`;
-  userSummary += `📞 Контакт: **${phone}**\n`;
+  userSummary += `📞 Контакт: **${md(phone)}**\n`;
   if (comment && comment !== "Без комментария") {
-    userSummary += `💬 Пожелание: _${comment}_\n`;
+    userSummary += `💬 Пожелание: ${md(comment)}\n`;
   }
   userSummary += `\nЗаявка отправлена менеджеру!`;
 
@@ -134,15 +135,15 @@ export async function checkoutConversation(conversation: MyConversation, ctx: My
   if (targetChat) {
     let orderMsg = `🔔 **НОВАЯ ЗАЯВКА #${result.orderId}**\n`;
     orderMsg += `━━━━━━━━━━━━━━━━━━━━\n`;
-    orderMsg += `👤 **Клиент / Заведение:** ${clientDisplayName}\n`;
+    orderMsg += `👤 **Клиент / Заведение:** ${md(clientDisplayName)}\n`;
     orderMsg += `🆔 **Telegram ID:** \`${userId}\`\n`;
-    orderMsg += `📞 **Телефон:** ${phone}\n`;
+    orderMsg += `📞 **Телефон:** ${md(phone)}\n`;
     if (comment && comment !== "Без комментария") {
-      orderMsg += `💬 **Комментарий:** ${comment}\n`;
+      orderMsg += `💬 **Комментарий:** ${md(comment)}\n`;
     }
     orderMsg += `\n📦 **Состав заказа:**\n`;
     for (const item of result.items) {
-      orderMsg += `• ${item.name} — ${item.quantity} шт. × ${item.price} ₽ = ${item.subtotal} ₽\n`;
+      orderMsg += `• ${md(item.name)} — ${item.quantity} шт. × ${item.price} ₽ = ${item.subtotal} ₽\n`;
     }
     orderMsg += `\n💰 **ИТОГО:** **${result.total} ₽**`;
 
@@ -176,7 +177,7 @@ export async function addCategoryConversation(conversation: MyConversation, ctx:
   const doneKb = new InlineKeyboard().text("◀️ Закончить и вернуться", "done_stream_cat");
 
   const helpText = `📁 **Потоковое создание папок**\n` +
-    `📍 Расположение: **${currentPath}**\n` +
+    `📍 Расположение: **${md(currentPath)}**\n` +
     `_(Все созданные папки будут вложены строго сюда)_\n` +
     `━━━━━━━━━━━━━━━━━━━━\n` +
     `Отправляйте названия папок сообщениями подряд:\n\n` +
@@ -212,8 +213,8 @@ export async function addCategoryConversation(conversation: MyConversation, ctx:
     if (names.length > 0) {
       await conversation.external(() => dbService.addCategoriesBatch(names, parentId));
       const ack = await ctx.reply(
-        `✅ Создано: ${names.map(n => `📁 **${n}**`).join(", ")}\n` +
-        `📍 Внутри: _${currentPath}_\n\n` +
+        `✅ Создано: ${names.map(n => `📁 **${md(n)}**`).join(", ")}\n` +
+        `📍 Внутри: ${md(currentPath)}\n\n` +
         `_Отправьте следующее название папки или нажмите кнопку ниже:_`,
         { parse_mode: "Markdown", reply_markup: doneKb }
       );
@@ -247,7 +248,7 @@ export async function addSingleProductConversation(conversation: MyConversation,
   const doneKb = new InlineKeyboard().text("◀️ Закончить и вернуться в папку", "done_stream_prod");
 
   const promptText = `📦 **Потоковое добавление товаров**\n` +
-    `📍 Раздел: **${pathStr}**\n` +
+    `📍 Раздел: **${md(pathStr)}**\n` +
     `━━━━━━━━━━━━━━━━━━━━\n` +
     `Вводите товары через пробел: \`Название Цена Количество\`\n\n` +
     `_Примеры сообщений:_\n` +
@@ -315,9 +316,9 @@ export async function addSingleProductConversation(conversation: MyConversation,
           );
           addedCount++;
           if (res.isUpdated) {
-            addedNames.push(`🔄 **${res.name}** (остаток +${stock} ➔ всего **${res.totalStock} шт.**, цена: **${res.price} ₽**)`);
+            addedNames.push(`🔄 **${md(res.name)}** (остаток +${stock} ➔ всего **${res.totalStock} шт.**, цена: **${res.price} ₽**)`);
           } else {
-            addedNames.push(`✅ **${res.name}** (**${res.price} ₽** | **${res.totalStock} шт.**)`);
+            addedNames.push(`✅ **${md(res.name)}** (**${res.price} ₽** | **${res.totalStock} шт.**)`);
           }
         }
       }
@@ -326,7 +327,7 @@ export async function addSingleProductConversation(conversation: MyConversation,
     if (addedCount > 0) {
       const ack = await ctx.reply(
         `${addedNames.join("\n")}\n` +
-        `📍 В папку: _${pathStr}_\n\n` +
+        `📍 В папку: ${md(pathStr)}\n\n` +
         `_Отправьте следующий товар или нажмите кнопку ниже:_`,
         { parse_mode: "Markdown", reply_markup: doneKb }
       );
@@ -362,7 +363,7 @@ export async function updateStockConversation(conversation: MyConversation, ctx:
   if (!product) return;
 
   const toClean: number[] = [];
-  const q = await ctx.reply(`📦 **${product.name}**\nТекущий остаток: **${product.stock} шт.**\n\nВведите **новое точное количество** (например \`70\`):`, {
+  const q = await ctx.reply(`📦 **${md(product.name)}**\nТекущий остаток: **${product.stock} шт.**\n\nВведите **новое точное количество** (например \`70\`):`, {
     parse_mode: "Markdown"
   });
   toClean.push(q.message_id);
@@ -378,7 +379,7 @@ export async function updateStockConversation(conversation: MyConversation, ctx:
     if (!isNaN(val) && val >= 0) {
       await conversation.external(() => dbService.updateProductStock(productId, val));
       await cleanupMessages(ctx, toClean);
-      const m = await ctx.reply(`✅ Остаток **${product.name}** обновлён: **${val} шт.**`, { parse_mode: "Markdown" });
+      const m = await ctx.reply(`✅ Остаток **${md(product.name)}** обновлён: **${val} шт.**`, { parse_mode: "Markdown" });
       setTimeout(() => ctx.api.deleteMessage(ctx.chat!.id, m.message_id).catch(() => {}), 3000);
       break;
     }
@@ -522,7 +523,7 @@ export async function editCustomerNameConversation(conversation: MyConversation,
   const kb = new InlineKeyboard().text("❌ Отмена", "cancel_edit_name");
   const q = await ctx.reply(
     `👤 **Укажите ваше имя или название заведения**\n\n` +
-    (current ? `Текущее значение: **${current}**\n\n` : "") +
+    (current ? `Текущее значение: **${md(current)}**\n\n` : "") +
     `Напишите имя или название сообщением (например \`Мята Lounge\` или \`Алексей\`):\n` +
     `_Для отмены нажмите кнопку ниже:_`,
     { parse_mode: "Markdown", reply_markup: kb }
@@ -551,7 +552,7 @@ export async function editCustomerNameConversation(conversation: MyConversation,
     if (text && text.length > 0 && text.length <= 50) {
       await conversation.external(() => dbService.setUserProfileName(userId, text));
       await cleanupMessages(ctx, toClean);
-      const m = await ctx.reply(`✅ Сохранено: **${text}**`, {
+      const m = await ctx.reply(`✅ Сохранено: **${md(text)}**`, {
         parse_mode: "Markdown"
       });
       setTimeout(() => ctx.api.deleteMessage(ctx.chat!.id, m.message_id).catch(() => {}), 3000);

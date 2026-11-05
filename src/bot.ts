@@ -5,6 +5,7 @@ import http from "node:http";
 import { MyContext, SessionData } from "./types.js";
 import { dbService, OrderRecord, OrderItem } from "./database.js";
 import { activeCategoryMap } from "./state.js";
+import { md } from "./format.js";
 import {
   checkoutConversation,
   addCategoryConversation,
@@ -39,11 +40,17 @@ bot.api.setMyCommands([
   { command: "start", description: "📁 Каталог и Склад" },
   { command: "cart", description: "🛒 Корзина заказа" },
   { command: "orders", description: "📋 Мои заказы / Заявки" },
+  { command: "contacts", description: "🏢 Контакты и время работы" },
   { command: "profile", description: "👤 Моё имя / профиль" },
   { command: "admin", description: "⚙️ Управление складом" }
 ]).catch(() => {});
 
 function isAdmin(ctx: MyContext): boolean {
+  const currentAdmin = dbService.getAdminId();
+  return Boolean(currentAdmin && ctx.from?.id === currentAdmin && !dbService.isBuyerMode(ctx.from!.id));
+}
+
+function isOwner(ctx: MyContext): boolean {
   const currentAdmin = dbService.getAdminId();
   return Boolean(currentAdmin && ctx.from?.id === currentAdmin);
 }
@@ -68,7 +75,8 @@ function getBottomKeyboard(ctx: MyContext): Keyboard {
   } else {
     const customName = uid ? dbService.getUserProfileName(uid) : null;
     const profileLabel = customName ? `👤 ${customName}` : "👤 Моё имя";
-    kb.text("📋 Мои заказы").text(profileLabel);
+    kb.text("📋 Мои заказы").text(profileLabel).row();
+    kb.text(`🏢 ${dbService.getVenueName()}`);
   }
 
   return kb.resized();
@@ -104,13 +112,14 @@ async function showAdminPanel(ctx: MyContext) {
   const ordersChat = dbService.getOrdersChatId();
 
   let text = `⚙️ **Управление складом и заказами**\n\n`;
-  text += `🏢 Заведение: **${venue}**\n`;
+  text += `🏢 Заведение: **${md(venue)}**\n`;
   text += `📢 Чат заказов: **${ordersChat ? `Подключен (${ordersChat})` : "В личку админу"}**\n\n`;
   text += `📊 **Сводка:**\n`;
   text += `• Всего товаров: **${stats.productsCount} шт.**\n`;
   text += `• Заказов: **${stats.ordersCount}**\n`;
   text += `• Выручка: **${stats.totalSales} ₽**\n\n`;
-  text += `_Для отправки заявок в группу введите /set_orders_chat в группе._`;
+  text += `_Для отправки заявок в группу введите /set_orders_chat в группе._\n`;
+  text += `_/set_contacts — адрес и часы работы_`;
 
   const kb = new InlineKeyboard()
     .text("📁 Открыть Склад", "cat_nav_root").row()
@@ -140,13 +149,32 @@ async function showCustomerProfile(ctx: MyContext) {
   const profileName = dbService.getUserProfileName(uid);
 
   let text = `👤 **Профиль покупателя**\n\n`;
-  text += `Имя / Заведение: **${profileName || "Не указано"}**\n`;
-  text += `Telegram ID: \`${uid}\`\n\n`;
+  text += `Имя / Заведение: **${md(profileName || "Не указано")}**\n\n`;
   text += `_Вы можете указать своё имя или название заведения, чтобы при заказе со склада было понятно, от кого поступила заявка._`;
 
   const kb = new InlineKeyboard()
     .text("✏️ Написать имя / заведение", "customer_edit_name").row()
     .text("📁 Перейти к товарам", "cat_nav_root");
+
+  if (ctx.callbackQuery) {
+    try {
+      await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb });
+    } catch {
+      await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
+    }
+  } else {
+    await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
+  }
+}
+
+// Контакты заведения для покупателя
+async function showContacts(ctx: MyContext) {
+  const venue = dbService.getVenueName();
+  const contacts = dbService.getVenueContacts();
+  const body = contacts ? md(contacts) : "Контакты пока не указаны.";
+  const text = `🏢 **${md(venue)}**\n\n${body}`;
+
+  const kb = new InlineKeyboard().text("📁 Перейти к товарам", "cat_nav_root");
 
   if (ctx.callbackQuery) {
     try {
@@ -184,6 +212,11 @@ bot.command(["profile", "name", "info"], async (ctx) => {
   await showCustomerProfile(ctx);
 });
 
+bot.command("contacts", async (ctx) => {
+  await deleteUserMessage(ctx);
+  await showContacts(ctx);
+});
+
 bot.command("admin", async (ctx) => {
   await deleteUserMessage(ctx);
   const uid = ctx.from?.id;
@@ -206,12 +239,17 @@ bot.command("admin", async (ctx) => {
     return;
   }
 
+  // Владелец в buyer mode — выключить и показать панель
+  if (dbService.isBuyerMode(uid)) {
+    dbService.setBuyerMode(uid, false);
+  }
+
   await showAdminPanel(ctx);
 });
 
 bot.callbackQuery("admin_transfer_owner", async (ctx) => {
   await ctx.answerCallbackQuery();
-  if (!isAdmin(ctx)) {
+  if (!isOwner(ctx)) {
     return ctx.reply("❌ Доступно только владельцу.");
   }
   await ctx.conversation.enter("transferOwnerConversation");
@@ -219,7 +257,7 @@ bot.callbackQuery("admin_transfer_owner", async (ctx) => {
 
 bot.command("transfer_owner", async (ctx) => {
   await deleteUserMessage(ctx);
-  if (!isAdmin(ctx)) {
+  if (!isOwner(ctx)) {
     await ctx.reply("❌ Команда доступна только текущему владельцу.");
     return;
   }
@@ -250,9 +288,18 @@ bot.callbackQuery("claim_admin_click", async (ctx) => {
   if (!uid) return;
 
   const currentAdmin = dbService.getAdminId();
-  if (currentAdmin && currentAdmin !== uid) {
+
+  if (currentAdmin === uid) {
+    // Владелец — выключить buyer mode и показать панель
+    dbService.setBuyerMode(uid, false);
+    await ctx.answerCallbackQuery({ text: "Вы назначены владельцем!" });
+    await showAdminPanel(ctx);
+    return;
+  }
+
+  if (currentAdmin !== null) {
     await ctx.answerCallbackQuery({ text: "Владелец уже назначен!" });
-    await ctx.reply("❌ Владелец уже назначен. Сменить владельца может только действующий администратор.");
+    await ctx.reply("❌ Владелец уже назначен.");
     return;
   }
 
@@ -274,8 +321,16 @@ bot.command("claim_admin", async (ctx) => {
   if (!uid) return;
 
   const currentAdmin = dbService.getAdminId();
-  if (currentAdmin && currentAdmin !== uid) {
-    await ctx.reply("❌ Владелец уже назначен. Передать права можно только через панель владельца или команду /transfer_owner.");
+
+  if (currentAdmin === uid) {
+    // Владелец — выключить buyer mode и показать панель
+    dbService.setBuyerMode(uid, false);
+    await showAdminPanel(ctx);
+    return;
+  }
+
+  if (currentAdmin !== null) {
+    await ctx.reply("❌ Владелец уже назначен.");
     return;
   }
 
@@ -291,12 +346,16 @@ bot.command("claim_admin", async (ctx) => {
 });
 
 bot.callbackQuery("admin_drop_role", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Статус владельца сброшен" });
-  dbService.clearAdminId();
+  if (!isOwner(ctx)) {
+    await ctx.answerCallbackQuery();
+    return;
+  }
+  const uid = ctx.from!.id;
+  dbService.setBuyerMode(uid, true);
+  await ctx.answerCallbackQuery({ text: "Режим покупателя включён" });
   await ctx.reply(
-    "🔄 **Вы переключились в режим покупателя!**\n\nКлавиатура обновлена.\n\n💡 _Чтобы вернуть права владельца, напишите:_ `/claim_admin`",
+    "🔄 Вы в режиме покупателя. Владение сохранено.\n\nЧтобы вернуться в панель — /admin",
     {
-      parse_mode: "Markdown",
       reply_markup: getBottomKeyboard(ctx)
     }
   );
@@ -304,11 +363,12 @@ bot.callbackQuery("admin_drop_role", async (ctx) => {
 
 async function handleResetAdmin(ctx: MyContext) {
   await deleteUserMessage(ctx);
-  dbService.clearAdminId();
+  if (!isOwner(ctx)) return;
+  const uid = ctx.from!.id;
+  dbService.setBuyerMode(uid, true);
   await ctx.reply(
-    "🔄 **Статус владельца сброшен!**\n\nТеперь вы обычный покупатель. Клавиатура обновлена.\n\n💡 _Чтобы вернуть права владельца, напишите:_ `/claim_admin`",
+    "🔄 Вы в режиме покупателя. Владение сохранено.\n\nЧтобы вернуться в панель — /admin",
     {
-      parse_mode: "Markdown",
       reply_markup: getBottomKeyboard(ctx)
     }
   );
@@ -318,8 +378,10 @@ bot.command("reset_admin", handleResetAdmin);
 bot.hears(/^(убери владельца|сбросить владельца|сброс админа)$/i, handleResetAdmin);
 
 bot.command("set_orders_chat", async (ctx) => {
-  if (!isAdmin(ctx) && ctx.chat?.type === "private") {
-    await ctx.reply("❌ Добавьте бота в группу для заказов и выполните команду /set_orders_chat внутри этой группы.");
+  if (!isOwner(ctx)) {
+    if (ctx.chat?.type === "private") {
+      await ctx.reply("❌ Добавьте бота в группу для заказов и выполните команду /set_orders_chat внутри этой группы.");
+    }
     return;
   }
   const chatId = ctx.chat?.id;
@@ -332,16 +394,30 @@ bot.command("set_orders_chat", async (ctx) => {
 });
 
 bot.command("set_venue", async (ctx) => {
-  if (!isAdmin(ctx)) return;
+  if (!isOwner(ctx)) return;
   const newName = ctx.message?.text?.replace("/set_venue", "").trim();
   if (newName) {
     dbService.setVenueName(newName);
-    await ctx.reply(`✅ Название заведения обновлено: **${newName}**!`, {
+    await ctx.reply(`✅ Название заведения обновлено: **${md(newName)}**!`, {
       parse_mode: "Markdown",
       reply_markup: getBottomKeyboard(ctx)
     });
   } else {
     await ctx.reply("Напишите: `/set_venue Название Заведения`", { parse_mode: "Markdown" });
+  }
+});
+
+bot.command("set_contacts", async (ctx) => {
+  if (!isOwner(ctx)) return;
+  const rawText = ctx.message?.text || "";
+  const match = rawText.match(/^\/set_contacts(?:@\S+)?(?:\s+([\s\S]+))?$/);
+  const newContacts = match?.[1]?.trim();
+  if (newContacts) {
+    dbService.setVenueContacts(newContacts);
+    await ctx.reply("✅ Контакты обновлены");
+    await showContacts(ctx);
+  } else {
+    await ctx.reply("Напишите: /set_contacts Адрес, телефон, часы работы");
   }
 });
 
@@ -371,13 +447,18 @@ bot.hears(/^⚙️\s*(Управление|Админ-панель).*$/i, async 
   await showAdminPanel(ctx);
 });
 
-bot.hears(/^(👤|🏢)\s*(.*)$/, async (ctx) => {
+bot.hears(/^👤\s*(.*)$/, async (ctx) => {
   await deleteUserMessage(ctx);
   if (isAdmin(ctx)) {
     await showAdminPanel(ctx);
   } else {
     await showCustomerProfile(ctx);
   }
+});
+
+bot.hears(/^🏢\s*(.*)$/, async (ctx) => {
+  await deleteUserMessage(ctx);
+  await showContacts(ctx);
 });
 
 bot.callbackQuery("customer_edit_name", async (ctx) => {
@@ -515,37 +596,43 @@ bot.callbackQuery(/^order_view_(\d+)$/, async (ctx) => {
 
   let text = `📋 **Заявка #${order.id}** [${statusName}]\n`;
   text += `━━━━━━━━━━━━━━━━━━━━\n`;
-  text += `👤 **Клиент:** ${order.user_name}\n`;
-  text += `📞 **Телефон:** ${order.phone || "не указан"}\n`;
+  text += `👤 **Клиент:** ${md(order.user_name)}\n`;
+  text += `📞 **Телефон:** ${md(order.phone || "не указан")}\n`;
   if (order.comment && order.comment !== "Без комментария") {
-    text += `💬 **Пожелание:** ${order.comment}\n`;
+    text += `💬 **Пожелание:** ${md(order.comment)}\n`;
   }
   text += `🕒 **Дата:** ${order.created_at}\n\n`;
 
   text += `📦 **Состав заявки:**\n`;
   for (const item of items) {
-    text += `• ${item.name} — ${item.quantity} шт. × ${item.price} ₽ = ${item.subtotal} ₽\n`;
+    text += `• ${md(item.name)} — ${item.quantity} шт. × ${item.price} ₽ = ${item.subtotal} ₽\n`;
   }
   text += `\n💰 **ИТОГО:** **${order.total_price} ₽**\n`;
 
-  const kb = new InlineKeyboard();
+  const buildKb = (withContact: boolean) => {
+    const kb = new InlineKeyboard();
+    if (isAdm) {
+      if (withContact) {
+        kb.url("💬 Написать клиенту", `tg://user?id=${order.user_id}`).row();
+      }
+      if (order.status === "new") {
+        kb.text("⏳ Взять в работу", `order_status_${order.id}_in_progress`).row();
+      }
+      if (order.status !== "completed" && order.status !== "cancelled") {
+        kb.text("✅ Завершить заказ", `order_status_${order.id}_completed`).row();
+        kb.text("❌ Отменить (вернуть на склад)", `order_cancel_${order.id}`).row();
+      }
+    }
+    kb.text("◀️ Назад к заявкам", "view_orders_all");
+    return kb;
+  };
 
-  if (isAdm) {
-    if (order.status === "new") {
-      kb.text("⏳ Взять в работу", `order_status_${order.id}_in_progress`).row();
-    }
-    if (order.status !== "completed" && order.status !== "cancelled") {
-      kb.text("✅ Завершить заказ", `order_status_${order.id}_completed`).row();
-      kb.text("❌ Отменить (вернуть на склад)", `order_cancel_${order.id}`).row();
-    }
+  try {
+    await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: buildKb(isAdm) });
+  } catch {
+    // Telegram отклоняет tg://user ссылку, если клиент запретил её настройками приватности
+    await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: buildKb(false) });
   }
-
-  kb.text("◀️ Назад к заявкам", "view_orders_all");
-
-  await ctx.editMessageText(text, {
-    parse_mode: "Markdown",
-    reply_markup: kb
-  });
 });
 
 bot.callbackQuery(/^order_status_(\d+)_(in_progress|completed)$/, async (ctx) => {
@@ -608,7 +695,10 @@ async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
   const userId = ctx.from?.id;
   if (userId) activeCategoryMap.set(userId, categoryId);
 
-  const subcategories = dbService.getCategoriesWithStats(categoryId);
+  let subcategories = dbService.getCategoriesWithStats(categoryId);
+  if (!isAdm) {
+    subcategories = subcategories.filter(sub => dbService.countProductsInSubtree(sub.id) > 0);
+  }
   const products = categoryId !== null ? dbService.getProductsByCategory(categoryId) : [];
   const currentCategory = categoryId !== null ? dbService.getCategoryById(categoryId) : null;
   const pathTitle = dbService.getCategoryPathString(categoryId);
@@ -634,7 +724,6 @@ async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
     if (categoryId !== null) {
       kb.text("📁 + Папка", `admin_add_subcat_${categoryId}`);
       kb.text("📦 + Товар", `admin_add_single_${categoryId}`).row();
-      kb.text("🗑 Удалить эту папку", `admin_del_cat_${categoryId}`).row();
     } else {
       kb.text("📁 + Создать папки", "admin_create_root_cat").row();
     }
@@ -648,13 +737,14 @@ async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
   if (categoryId !== null && currentCategory) {
     const backTarget = currentCategory.parent_id !== null ? `cat_nav_${currentCategory.parent_id}` : "cat_nav_root";
     kb.text("◀️ Назад", backTarget);
-    if (currentCategory.parent_id !== null) {
-      kb.text("🏠 В корень", "cat_nav_root");
-    }
     kb.row();
   }
 
-  let text = `📍 **${pathTitle}**\n`;
+  if (isAdm && categoryId !== null) {
+    kb.text("🗑 Удалить эту папку", `admin_del_cat_${categoryId}`).row();
+  }
+
+  let text = `📍 **${md(pathTitle)}**\n`;
   text += `━━━━━━━━━━━━━━━━━━━━\n`;
 
   if (subcategories.length === 0 && products.length === 0) {
@@ -718,6 +808,30 @@ bot.callbackQuery(/^admin_del_cat_(\d+)$/, async (ctx) => {
   if (!isAdmin(ctx)) return;
   const catId = parseInt(ctx.match[1], 10);
   const cat = dbService.getCategoryById(catId);
+  if (!cat) {
+    await renderWarehouseView(ctx, null);
+    return;
+  }
+
+  const count = dbService.countAllProductsInSubtree(catId);
+  const text = `🗑 Удалить папку **${md(cat.name)}** со всеми вложенными папками и товарами (${count} шт.)?`;
+  const kb = new InlineKeyboard()
+    .text("✅ Да, удалить", `admin_del_cat_yes_${catId}`)
+    .text("◀️ Отмена", `cat_nav_${catId}`);
+
+  await ctx.editMessageText(text, {
+    parse_mode: "Markdown",
+    reply_markup: kb
+  });
+});
+
+bot.callbackQuery(/^admin_del_cat_yes_(\d+)$/, async (ctx) => {
+  if (!isAdmin(ctx)) {
+    await ctx.answerCallbackQuery();
+    return;
+  }
+  const catId = parseInt(ctx.match[1], 10);
+  const cat = dbService.getCategoryById(catId);
   const parentId = cat?.parent_id ?? null;
 
   dbService.deleteCategory(catId);
@@ -741,11 +855,11 @@ bot.callbackQuery(/^prod_(\d+)$/, async (ctx) => {
   const stockText = inStock ? `🟢 В наличии: **${product.stock} шт.**` : "🔴 **Нет в наличии**";
   const pathStr = dbService.getCategoryPathString(product.category_id);
 
-  let text = `📦 **${product.name}**\n`;
-  text += `📍 Раздел: _${pathStr}_\n`;
+  let text = `📦 **${md(product.name)}**\n`;
+  text += `📍 Раздел: ${md(pathStr)}\n`;
   text += `━━━━━━━━━━━━━━━━━━━━\n`;
   if (product.description) {
-    text += `${product.description}\n\n`;
+    text += `${md(product.description)}\n\n`;
   }
   text += `💰 Цена: **${product.price} ₽**\n`;
   text += `📊 На складе: ${stockText}\n`;
@@ -812,8 +926,11 @@ bot.callbackQuery(/^edit_stock_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery(/^admin_del_prod_(\d+)$/, async (ctx) => {
+  if (!isAdmin(ctx)) {
+    await ctx.answerCallbackQuery();
+    return;
+  }
   await ctx.answerCallbackQuery({ text: "Товар удалён!" });
-  if (!isAdmin(ctx)) return;
   const prodId = parseInt(ctx.match[1], 10);
   const prod = dbService.getProductById(prodId);
   if (prod) {
@@ -853,7 +970,7 @@ async function renderCartView(ctx: MyContext) {
   cart.forEach((item) => {
     const subtotal = item.quantity * item.price;
     total += subtotal;
-    text += `• **${item.name}**\n  ${item.quantity} шт. × ${item.price} ₽ = **${subtotal} ₽**\n\n`;
+    text += `• **${md(item.name)}**\n  ${item.quantity} шт. × ${item.price} ₽ = **${subtotal} ₽**\n\n`;
 
     kb.text(`➖`, `cart_decr_${item.product_id}`)
       .text(`${item.quantity} шт.`, `cart_qty_info`)
