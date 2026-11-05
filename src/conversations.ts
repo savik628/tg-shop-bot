@@ -287,16 +287,20 @@ export async function addSingleProductConversation(conversation: MyConversation,
         }
 
         if (name && price >= 0 && stock >= 0) {
-          dbService.addProduct(categoryId, name, "", price, stock);
+          const res = dbService.addProduct(categoryId, name, "", price, stock);
           addedCount++;
-          addedNames.push(`${name} (${price} ₽, ${stock} шт.)`);
+          if (res.isUpdated) {
+            addedNames.push(`🔄 **${res.name}** (остаток +${stock} ➔ всего **${res.totalStock} шт.**, цена: **${res.price} ₽**)`);
+          } else {
+            addedNames.push(`✅ **${res.name}** (**${res.price} ₽** | **${res.totalStock} шт.**)`);
+          }
         }
       }
     }
 
     if (addedCount > 0) {
       const ack = await ctx.reply(
-        `✅ Добавлено: **${addedNames.join(", ")}**\n` +
+        `${addedNames.join("\n")}\n` +
         `📍 В папку: _${pathStr}_\n\n` +
         `_Отправьте следующий товар или нажмите кнопку ниже:_`,
         { parse_mode: "Markdown", reply_markup: doneKb }

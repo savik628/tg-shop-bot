@@ -80,6 +80,44 @@ function ensureDefaultCategories() {
 }
 ensureDefaultCategories();
 
+// Слияние уже созданных дубликатов с суммированием остатка
+function mergeDuplicateProducts() {
+  try {
+    const duplicates = db.prepare(`
+      SELECT category_id, LOWER(name) as lower_name, COUNT(*) as cnt
+      FROM products
+      GROUP BY category_id, LOWER(name)
+      HAVING cnt > 1
+    `).all() as { category_id: number; lower_name: string; cnt: number }[];
+
+    for (const dup of duplicates) {
+      const items = db.prepare(`
+        SELECT id, name, price, stock FROM products
+        WHERE category_id = ? AND LOWER(name) = ?
+        ORDER BY id ASC
+      `).all(dup.category_id, dup.lower_name) as { id: number; name: string; price: number; stock: number }[];
+
+      if (items.length > 1) {
+        const main = items[0];
+        let totalStock = 0;
+        let latestPrice = main.price;
+
+        for (const item of items) {
+          totalStock += item.stock;
+          latestPrice = item.price;
+        }
+
+        db.prepare("UPDATE products SET stock = ?, price = ? WHERE id = ?").run(totalStock, latestPrice, main.id);
+
+        for (let i = 1; i < items.length; i++) {
+          db.prepare("DELETE FROM products WHERE id = ?").run(items[i].id);
+        }
+      }
+    }
+  } catch {}
+}
+mergeDuplicateProducts();
+
 export interface Category {
   id: number;
   parent_id: number | null;
@@ -230,29 +268,57 @@ export const dbService = {
     return db.prepare("SELECT * FROM products WHERE id = ?").get(id) as Product | undefined;
   },
 
-  addProduct(categoryId: number, name: string, description: string, price: number, stock: number): number {
+  addProduct(
+    categoryId: number,
+    name: string,
+    description: string,
+    price: number,
+    stock: number
+  ): { id: number; isUpdated: boolean; totalStock: number; name: string; price: number } {
+    const trimmedName = name.trim();
+    // Проверка на существующий товар в этой категории (без учета регистра)
+    const existing = db.prepare(`
+      SELECT id, name, stock, price FROM products
+      WHERE category_id = ? AND LOWER(name) = LOWER(?)
+    `).get(categoryId, trimmedName) as { id: number; name: string; stock: number; price: number } | undefined;
+
+    if (existing) {
+      const newStock = existing.stock + stock;
+      db.prepare(`
+        UPDATE products SET stock = ?, price = ? WHERE id = ?
+      `).run(newStock, price, existing.id);
+      return {
+        id: existing.id,
+        isUpdated: true,
+        totalStock: newStock,
+        name: existing.name,
+        price
+      };
+    }
+
     const stmt = db.prepare(`
       INSERT INTO products (category_id, name, description, price, stock)
       VALUES (?, ?, ?, ?, ?)
     `);
-    const info = stmt.run(categoryId, name.trim(), description.trim(), price, stock);
-    return Number(info.lastInsertRowid);
+    const info = stmt.run(categoryId, trimmedName, description.trim(), price, stock);
+    return {
+      id: Number(info.lastInsertRowid),
+      isUpdated: false,
+      totalStock: stock,
+      name: trimmedName,
+      price
+    };
   },
 
-  // Пакетное добавление товаров списком
+  // Пакетное добавление товаров списком с автоматическим слиянием дублей
   addBatchProducts(
     categoryId: number,
     items: Array<{ name: string; price: number; stock: number; description?: string }>
   ): number {
-    const insertStmt = db.prepare(`
-      INSERT INTO products (category_id, name, description, price, stock)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-
     const tx = db.transaction(() => {
       let count = 0;
       for (const item of items) {
-        insertStmt.run(categoryId, item.name.trim(), (item.description || "").trim(), item.price, item.stock);
+        this.addProduct(categoryId, item.name, item.description || "", item.price, item.stock);
         count++;
       }
       return count;
