@@ -12,13 +12,15 @@ import {
   importProductsToDb,
   ParsedItem
 } from "./excel.js";
+import { fetchGoogleSheetsBuffer, extractSpreadsheetId } from "./googleSheets.js";
 import {
   checkoutConversation,
   addCategoryConversation,
   addSingleProductConversation,
   updateStockConversation,
   transferOwnerConversation,
-  editCustomerNameConversation
+  editCustomerNameConversation,
+  bindGoogleSheetsConversation
 } from "./conversations.js";
 
 dotenv.config();
@@ -43,12 +45,14 @@ bot.use(createConversation(addSingleProductConversation));
 bot.use(createConversation(updateStockConversation));
 bot.use(createConversation(transferOwnerConversation));
 bot.use(createConversation(editCustomerNameConversation));
+bot.use(createConversation(bindGoogleSheetsConversation));
 
 // Официальное меню Telegram
 bot.api.setMyCommands([
   { command: "start", description: "📁 Каталог и Склад" },
   { command: "cart", description: "🛒 Корзина заказа" },
   { command: "orders", description: "📋 Мои заказы / Заявки" },
+  { command: "sync", description: "🔄 Синхронизировать склад" },
   { command: "contacts", description: "🏢 Контакты и время работы" },
   { command: "profile", description: "👤 Моё имя / профиль" },
   { command: "admin", description: "⚙️ Управление складом" }
@@ -119,26 +123,41 @@ async function showAdminPanel(ctx: MyContext) {
   const stats = dbService.getStats();
   const venue = dbService.getVenueName();
   const ordersChat = dbService.getOrdersChatId();
+  const sheetsUrl = dbService.getGoogleSheetsUrl();
+  const sheetsSync = dbService.getGoogleSheetsLastSync();
 
   let text = `⚙️ **Управление складом и заказами**\n\n`;
   text += `🏢 Заведение: **${md(venue)}**\n`;
-  text += `📢 Чат заказов: **${ordersChat ? `Подключен (${ordersChat})` : "В личку админу"}**\n\n`;
-  text += `📊 **Сводка:**\n`;
+  text += `📢 Чат заказов: **${ordersChat ? `Подключен (${ordersChat})` : "В личку админу"}**\n`;
+  if (sheetsUrl) {
+    text += `📊 Google Таблица: **Подключена**\n`;
+    if (sheetsSync) text += `🕒 Синхронизировано: **${sheetsSync}**\n`;
+  } else {
+    text += `📊 Google Таблица: _не подключена_\n`;
+  }
+  text += `\n📊 **Сводка:**\n`;
   text += `• Всего товаров: **${stats.productsCount} шт.**\n`;
   text += `• Заказов: **${stats.ordersCount}**\n`;
   text += `• Выручка: **${stats.totalSales} ₽**\n\n`;
-  text += `_Для отправки заявок в группу введите /set_orders_chat в группе._\n`;
-  text += `_/set_contacts — адрес и часы работы_`;
+  text += `_Быстрые команды: /sync — синхронизация, /contacts — контакты_`;
 
   const kb = new InlineKeyboard()
     .text("📁 Открыть Склад", "cat_nav_root").row()
-    .text("📋 Все заявки склада", "view_orders_all").row()
-    .text("📁 + Создать корневые папки", "admin_create_root_cat").row()
-    .text("📊 Загрузить Excel", "admin_excel_start")
+    .text("📋 Все заявки склада", "view_orders_all").row();
+
+  if (sheetsUrl) {
+    kb.text("🔄 Синхронизировать склад", "admin_sheets_quick_sync").row();
+    kb.text("📊 Настройки Google Таблицы", "admin_sheets_menu");
+  } else {
+    kb.text("📊 Подключить Google Таблицу", "admin_sheets_menu");
+  }
+  kb.text("📁 + Папки", "admin_create_root_cat").row();
+
+  kb.text("📊 Загрузить Excel", "admin_excel_start")
     .text("📥 Шаблон Excel", "admin_excel_template").row()
     .text("👑 Сменить владельца", "admin_transfer_owner").row()
     .text("👤 Режим покупателя", "admin_drop_role").row()
-    .text("🔄 Обновить", "admin_refresh").row()
+    .text("🔄 Обновить сводку", "admin_refresh").row()
     .text("◀️ В меню", "menu_main");
 
   if (ctx.callbackQuery) {
@@ -684,6 +703,164 @@ bot.callbackQuery(/^excel_cancel_(\w+)$/, async (ctx) => {
   } catch {}
 });
 
+// ======================== ИНТЕГРАЦИЯ С GOOGLE ТАБЛИЦАМИ ========================
+
+async function showGoogleSheetsDashboard(ctx: MyContext) {
+  if (!isAdmin(ctx)) return;
+
+  const url = dbService.getGoogleSheetsUrl();
+  const lastSync = dbService.getGoogleSheetsLastSync();
+
+  let text = `📊 **Управление Google Таблицей**\n`;
+  text += `━━━━━━━━━━━━━━━━━━━━\n`;
+
+  const kb = new InlineKeyboard();
+
+  if (url) {
+    text += `🔗 **Подключенная таблица:**\n\`${url}\`\n\n`;
+    text += `🕒 Последняя синхронизация: **${lastSync || "ещё не проводилась"}**\n\n`;
+    text += `_Вы можете редактировать категории, товары, цены и остатки прямо в Google Таблице, а затем нажать «Синхронизировать сейчас»._`;
+
+    kb.text("🔄 Синхронизировать сейчас", "admin_sheets_quick_sync").row();
+    kb.text("✏️ Сменить ссылку", "admin_sheets_bind_start");
+    kb.text("❌ Отвязать", "admin_sheets_unlink").row();
+  } else {
+    text += `Статус: _Таблица не подключена_\n\n`;
+    text += `Подключите Google Таблицу, чтобы склад автоматически обновлялся по ссылке!\n\n`;
+    text += `💡 **Как подключить:**\n`;
+    text += `1. Откройте таблицу в Google Документах\n`;
+    text += `2. Нажмите «Настройки доступа» ➔ выберите **«Все, у кого есть ссылка — Читатель»**\n`;
+    text += `3. Нажмите кнопку «Привязать таблицу» ниже или просто отправьте ссылку в чат.`;
+
+    kb.text("🔗 Привязать Google Таблицу", "admin_sheets_bind_start").row();
+    kb.text("📥 Скачать шаблон таблицы", "admin_excel_template").row();
+  }
+
+  kb.text("◀️ В управление", "admin_main");
+
+  if (ctx.callbackQuery) {
+    try {
+      await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb });
+    } catch {
+      await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
+    }
+  } else {
+    await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
+  }
+}
+
+async function syncGoogleSheetsAction(ctx: MyContext) {
+  if (!isAdmin(ctx)) {
+    return ctx.reply("❌ Доступно только администратору.");
+  }
+
+  const url = dbService.getGoogleSheetsUrl();
+  if (!url) {
+    const kb = new InlineKeyboard().text("🔗 Привязать Google Таблицу", "admin_sheets_bind_start");
+    return ctx.reply(
+      "❌ **Google Таблица ещё не подключена.**\n\nПривяжите таблицу по кнопке ниже:",
+      { parse_mode: "Markdown", reply_markup: kb }
+    );
+  }
+
+  const waitMsg = await ctx.reply("⏳ Загружаю актуальные данные из Google Таблицы...");
+
+  try {
+    const fetchRes = await fetchGoogleSheetsBuffer(url);
+    if (!fetchRes.success || !fetchRes.buffer) {
+      await ctx.api.deleteMessage(ctx.chat!.id, waitMsg.message_id).catch(() => {});
+      return ctx.reply(`❌ **Ошибка загрузки Google Таблицы:**\n\n${fetchRes.error || "сбой соединения"}\n\nПроверьте доступ: «Все, у кого есть ссылка — Читатель».`, { parse_mode: "Markdown" });
+    }
+
+    const parseRes = parseExcelBuffer(fetchRes.buffer);
+    if (parseRes.items.length === 0) {
+      await ctx.api.deleteMessage(ctx.chat!.id, waitMsg.message_id).catch(() => {});
+      return ctx.reply("❌ В Google Таблице не найдены строки с товарами. Проверьте заголовки колонок: `Категория`, `Товар`, `Цена`, `Количество`.");
+    }
+
+    const importRes = importProductsToDb(parseRes.items, "replace_stock");
+    const nowStr = new Date().toLocaleString("ru-RU", { timeZone: "Europe/Moscow" });
+    dbService.setGoogleSheetsLastSync(nowStr);
+
+    await ctx.api.deleteMessage(ctx.chat!.id, waitMsg.message_id).catch(() => {});
+
+    let text = `✅ **Склад успешно синхронизирован с Google Таблицей!**\n`;
+    text += `━━━━━━━━━━━━━━━━━━━━\n`;
+    text += `🕒 Время: **${nowStr}**\n`;
+    text += `📦 Товаров в таблице: **${parseRes.items.length} шт.**\n`;
+    text += `📁 Создано новых папок: **${importRes.categoriesCreated}**\n`;
+    text += `📦 Новых позиций создано: **${importRes.productsCreated} шт.**\n`;
+    text += `🔄 Существующих позиций обновлено: **${importRes.productsUpdated} шт.**\n`;
+
+    const kb = new InlineKeyboard()
+      .text("📁 Открыть Склад", "cat_nav_root").row()
+      .text("⚙️ В управление", "admin_main");
+
+    await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb });
+  } catch (err: any) {
+    await ctx.api.deleteMessage(ctx.chat!.id, waitMsg.message_id).catch(() => {});
+    await ctx.reply(`❌ Сбой синхронизации: ${err?.message || "неизвестная ошибка"}`);
+  }
+}
+
+bot.command(["sheets", "googlesheets"], async (ctx) => {
+  await deleteUserMessage(ctx);
+  if (!isAdmin(ctx)) return;
+  const match = ctx.message?.text?.match(/https:\/\/docs\.google\.com\/spreadsheets\/[^\s]+/);
+  if (match) {
+    const rawUrl = match[0];
+    dbService.setGoogleSheetsUrl(rawUrl);
+    await ctx.reply(`✅ Ссылка на Google Таблицу привязана:\n\`${rawUrl}\`\n\nЗапускаю синхронизацию...`, { parse_mode: "Markdown" });
+    await syncGoogleSheetsAction(ctx);
+    return;
+  }
+  await showGoogleSheetsDashboard(ctx);
+});
+
+bot.command("sync", async (ctx) => {
+  await deleteUserMessage(ctx);
+  await syncGoogleSheetsAction(ctx);
+});
+
+bot.callbackQuery("admin_sheets_menu", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await showGoogleSheetsDashboard(ctx);
+});
+
+bot.callbackQuery("admin_sheets_bind_start", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await ctx.conversation.enter("bindGoogleSheetsConversation");
+});
+
+bot.callbackQuery("admin_sheets_quick_sync", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "Запуск синхронизации..." });
+  await syncGoogleSheetsAction(ctx);
+});
+
+bot.callbackQuery("admin_sheets_unlink", async (ctx) => {
+  dbService.setGoogleSheetsUrl(null);
+  await ctx.answerCallbackQuery({ text: "Google Таблица отвязана" });
+  await showGoogleSheetsDashboard(ctx);
+});
+
+bot.hears(/https:\/\/docs\.google\.com\/spreadsheets\/[^\s]+/i, async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const match = ctx.message?.text?.match(/https:\/\/docs\.google\.com\/spreadsheets\/[^\s]+/i);
+  if (!match) return;
+  const url = match[0];
+
+  const currentUrl = dbService.getGoogleSheetsUrl();
+  if (currentUrl === url) {
+    await ctx.reply("🔄 Запускаю синхронизацию со склада с привязанной Google Таблицей...");
+    await syncGoogleSheetsAction(ctx);
+    return;
+  }
+
+  dbService.setGoogleSheetsUrl(url);
+  await ctx.reply(`✅ Google Таблица привязана!\n\`${url}\`\n\nЗапускаю первичную синхронизацию склада...`, { parse_mode: "Markdown" });
+  await syncGoogleSheetsAction(ctx);
+});
+
 // ======================== УПРАВЛЕНИЕ ЗАЯВКАМИ ========================
 
 const STATUS_ICONS: Record<string, string> = {
@@ -928,6 +1105,10 @@ async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
     } else {
       kb.text("📁 + Создать папки", "admin_create_root_cat");
       kb.text("📊 Загрузить Excel", "admin_excel_start").row();
+      const sheetsUrl = dbService.getGoogleSheetsUrl();
+      if (sheetsUrl) {
+        kb.text("🔄 Синхронизировать с Google", "admin_sheets_quick_sync").row();
+      }
     }
   }
 

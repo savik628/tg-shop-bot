@@ -3,6 +3,8 @@ import { dbService } from "./database.js";
 import { activeCategoryMap } from "./state.js";
 import { InlineKeyboard, Keyboard } from "grammy";
 import { md } from "./format.js";
+import { fetchGoogleSheetsBuffer } from "./googleSheets.js";
+import { parseExcelBuffer, importProductsToDb } from "./excel.js";
 
 // Утилита очистки временных сообщений
 async function cleanupMessages(ctx: MyContext, ids: number[]) {
@@ -561,5 +563,102 @@ export async function editCustomerNameConversation(conversation: MyConversation,
 
     const err = await ctx.reply("Введите текст (от 1 до 50 символов) или /cancel:");
     toClean.push(err.message_id);
+  }
+}
+
+// ======================== ПРИВЯЗКА GOOGLE ТАБЛИЦЫ ========================
+export async function bindGoogleSheetsConversation(conversation: MyConversation, ctx: MyContext) {
+  const currentAdmin = dbService.getAdminId();
+  if (!currentAdmin || ctx.from?.id !== currentAdmin) {
+    await ctx.reply("❌ Доступно только администратору.");
+    return;
+  }
+
+  const currentUrl = dbService.getGoogleSheetsUrl();
+  const toClean: number[] = [];
+
+  const kb = new InlineKeyboard().text("❌ Отмена", "cancel_sheets_bind");
+  let promptText = `📊 **Привязка Google Таблицы к складу**\n\n`;
+  if (currentUrl) {
+    promptText += `Текущая привязанная таблица:\n\`${currentUrl}\`\n\n`;
+    promptText += `Отправьте **новую ссылку** на Google Таблицу:\n`;
+  } else {
+    promptText += `Отправьте **ссылку на Google Таблицу** в чат:\n`;
+  }
+  promptText += `\n💡 **Требования к доступу:**\n` +
+    `В таблице должен быть открыт доступ по ссылке:\n` +
+    `_«Все, у кого есть ссылка — Читатель»_\n\n` +
+    `_Для отмены нажмите кнопку ниже:_`;
+
+  const q = await ctx.reply(promptText, { parse_mode: "Markdown", reply_markup: kb });
+  toClean.push(q.message_id);
+
+  while (true) {
+    const res = await conversation.wait();
+
+    if (res.callbackQuery?.data === "cancel_sheets_bind") {
+      await res.answerCallbackQuery().catch(() => {});
+      await cleanupMessages(ctx, toClean);
+      return;
+    }
+
+    if (res.message?.message_id) {
+      toClean.push(res.message.message_id);
+    }
+
+    if (res.message?.text === "/cancel" || res.message?.text === "❌ Отмена") {
+      await cleanupMessages(ctx, toClean);
+      return;
+    }
+
+    const text = res.message?.text?.trim();
+    if (!text || !text.includes("docs.google.com/spreadsheets")) {
+      const err = await ctx.reply("⚠️ Пожалуйста, отправьте корректную ссылку на Google Таблицу (вида https://docs.google.com/spreadsheets/d/.../edit) или /cancel:");
+      toClean.push(err.message_id);
+      continue;
+    }
+
+    const checkingMsg = await ctx.reply("⏳ Проверяю доступ к таблице и загружаю структуру...");
+    toClean.push(checkingMsg.message_id);
+
+    const fetchRes = await conversation.external(() => fetchGoogleSheetsBuffer(text));
+    if (!fetchRes.success || !fetchRes.buffer) {
+      const err = await ctx.reply(`❌ **Не удалось загрузить таблицу:**\n\n${fetchRes.error || "ошибка"}\n\nПроверьте доступ и отправьте ссылку снова или /cancel:`, { parse_mode: "Markdown" });
+      toClean.push(err.message_id);
+      continue;
+    }
+
+    const parseRes = parseExcelBuffer(fetchRes.buffer);
+    if (parseRes.items.length === 0) {
+      const err = await ctx.reply("❌ В таблице не найдены строки с товарами. Убедитесь, что заполнены колонки `Категория`, `Товар`, `Цена`, `Количество`.\n\nПопробуйте снова или /cancel:");
+      toClean.push(err.message_id);
+      continue;
+    }
+
+    // Сохраняем URL и проводим первичную синхронизацию
+    await conversation.external(() => {
+      dbService.setGoogleSheetsUrl(text);
+      const nowStr = new Date().toLocaleString("ru-RU", { timeZone: "Europe/Moscow" });
+      dbService.setGoogleSheetsLastSync(nowStr);
+    });
+
+    const importRes = await conversation.external(() => importProductsToDb(parseRes.items, "replace_stock"));
+
+    await cleanupMessages(ctx, toClean);
+
+    let summaryText = `🎉 **Google Таблица успешно подключена!**\n`;
+    summaryText += `━━━━━━━━━━━━━━━━━━━━\n`;
+    summaryText += `📦 Распознано товаров: **${parseRes.items.length} шт.**\n`;
+    summaryText += `📁 Создано новых папок: **${importRes.categoriesCreated}**\n`;
+    summaryText += `📦 Создано новых позиций: **${importRes.productsCreated}**\n`;
+    summaryText += `🔄 Обновлено позиций: **${importRes.productsUpdated}**\n\n`;
+    summaryText += `Теперь при любом изменении в Google Таблице просто нажмите кнопку **«🔄 Синхронизировать»** в панели управления!`;
+
+    const backKb = new InlineKeyboard()
+      .text("📁 Открыть Склад", "cat_nav_root").row()
+      .text("⚙️ В управление", "admin_main");
+
+    await ctx.reply(summaryText, { parse_mode: "Markdown", reply_markup: backKb });
+    break;
   }
 }

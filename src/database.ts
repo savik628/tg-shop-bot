@@ -273,6 +273,37 @@ export const dbService = {
     `).run(text.trim());
   },
 
+  // Google Таблицы
+  getGoogleSheetsUrl(): string | null {
+    const row = db.prepare("SELECT value FROM settings WHERE key = 'google_sheets_url'").get() as { value: string } | undefined;
+    return row?.value || process.env.GOOGLE_SHEETS_URL || null;
+  },
+
+  setGoogleSheetsUrl(url: string | null): void {
+    if (!url) {
+      db.prepare("DELETE FROM settings WHERE key = 'google_sheets_url'").run();
+      return;
+    }
+    db.prepare(`
+      INSERT INTO settings (key, value)
+      VALUES ('google_sheets_url', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(url.trim());
+  },
+
+  getGoogleSheetsLastSync(): string | null {
+    const row = db.prepare("SELECT value FROM settings WHERE key = 'google_sheets_last_sync'").get() as { value: string } | undefined;
+    return row?.value || null;
+  },
+
+  setGoogleSheetsLastSync(val: string): void {
+    db.prepare(`
+      INSERT INTO settings (key, value)
+      VALUES ('google_sheets_last_sync', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(val);
+  },
+
   // Профиль покупателя (имя / заведение)
   getUserProfileName(userId: number): string | null {
     const row = db.prepare("SELECT name FROM user_profiles WHERE user_id = ?").get(userId) as { name: string } | undefined;
