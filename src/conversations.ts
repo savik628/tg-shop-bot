@@ -2,7 +2,7 @@ import { MyConversation, MyContext } from "./types.js";
 import { dbService } from "./database.js";
 import { activeCategoryMap, activeScreenMessageMap } from "./state.js";
 import { InlineKeyboard, Keyboard } from "grammy";
-import { md } from "./format.js";
+import { md, html } from "./format.js";
 import { fetchGoogleSheetsBuffer } from "./googleSheets.js";
 import { parseCsvBuffer, importProductsToDb } from "./excel.js";
 
@@ -114,21 +114,27 @@ export async function checkoutConversation(conversation: MyConversation, ctx: My
     return;
   }
 
-  // Компактное подтверждение покупателю без спама
-  let userSummary = `✅ **Заявка #${result.orderId} принята!**\n\n`;
-  userSummary += `💰 Сумма к оплате: **${result.total} ₽**\n`;
-  userSummary += `📞 Контакт: **${md(phone)}**\n`;
+  // Компактное подтверждение покупателю со сворачиваемой накладной
+  let userSummary = `✅ <b>Заявка #${result.orderId} принята!</b>\n\n`;
+  userSummary += `💰 Сумма к оплате: <b>${result.total} ₽</b>\n`;
+  userSummary += `📞 Контакт: <b>${html(phone)}</b>\n`;
   if (comment && comment !== "Без комментария") {
-    userSummary += `💬 Пожелание: ${md(comment)}\n`;
+    userSummary += `💬 Пожелание: <i>${html(comment)}</i>\n`;
   }
-  userSummary += `\nЗаявка отправлена менеджеру!`;
+  userSummary += `\n📋 <b>Состав накладной:</b>\n`;
+  userSummary += `<blockquote expandable>\n`;
+  for (const item of result.items) {
+    userSummary += `• ${html(item.name)} — ${item.quantity} шт. × ${item.price} ₽ = ${item.subtotal} ₽\n`;
+  }
+  userSummary += `</blockquote>\n`;
+  userSummary += `Заявка отправлена менеджеру на сборку!`;
 
   const backKb = new InlineKeyboard()
-    .text("📁 Вернуться на Склад", "cat_nav_root").row()
+    .text("📁 На Склад", "cat_nav_root").row()
     .text("📋 Мои заказы", "user_orders");
 
   const confMsg = await ctx.reply(userSummary, {
-    parse_mode: "Markdown",
+    parse_mode: "HTML",
     reply_markup: backKb
   });
   if (ctx.chat?.id) {
@@ -138,19 +144,21 @@ export async function checkoutConversation(conversation: MyConversation, ctx: My
   // Отправка заявки администратору или в группу заказов
   const targetChat = dbService.getOrdersChatId() || dbService.getAdminId();
   if (targetChat) {
-    let orderMsg = `🔔 **НОВАЯ ЗАЯВКА #${result.orderId}**\n`;
+    let orderMsg = `🔔 <b>НОВАЯ ЗАЯВКА #${result.orderId}</b>\n`;
     orderMsg += `━━━━━━━━━━━━━━━━━━━━\n`;
-    orderMsg += `👤 **Клиент / Заведение:** ${md(clientDisplayName)}\n`;
-    orderMsg += `🆔 **Telegram ID:** \`${userId}\`\n`;
-    orderMsg += `📞 **Телефон:** ${md(phone)}\n`;
+    orderMsg += `👤 <b>Клиент / Заведение:</b> ${html(clientDisplayName)}\n`;
+    orderMsg += `🆔 <b>Telegram ID:</b> <code>${userId}</code>\n`;
+    orderMsg += `📞 <b>Телефон:</b> ${html(phone)}\n`;
     if (comment && comment !== "Без комментария") {
-      orderMsg += `💬 **Комментарий:** ${md(comment)}\n`;
+      orderMsg += `💬 <b>Комментарий:</b> ${html(comment)}\n`;
     }
-    orderMsg += `\n📦 **Состав заказа:**\n`;
+    orderMsg += `\n📦 <b>Состав накладной:</b>\n`;
+    orderMsg += `<blockquote expandable>\n`;
     for (const item of result.items) {
-      orderMsg += `• ${md(item.name)} — ${item.quantity} шт. × ${item.price} ₽ = ${item.subtotal} ₽\n`;
+      orderMsg += `• ${html(item.name)} — ${item.quantity} шт. × ${item.price} ₽ = ${item.subtotal} ₽\n`;
     }
-    orderMsg += `\n💰 **ИТОГО:** **${result.total} ₽**`;
+    orderMsg += `</blockquote>\n`;
+    orderMsg += `💰 <b>ИТОГО:</b> <b>${result.total} ₽</b>`;
 
     const manageKb = new InlineKeyboard()
       .text("⏳ В работу", `order_status_${result.orderId}_in_progress`)
@@ -163,7 +171,7 @@ export async function checkoutConversation(conversation: MyConversation, ctx: My
 
     try {
       await ctx.api.sendMessage(targetChat, orderMsg, {
-        parse_mode: "Markdown",
+        parse_mode: "HTML",
         reply_markup: manageKb
       });
     } catch (e: any) {

@@ -5,7 +5,7 @@ import http from "node:http";
 import { MyContext, SessionData } from "./types.js";
 import { dbService, OrderRecord, OrderItem, Product } from "./database.js";
 import { activeCategoryMap, activeScreenMessageMap } from "./state.js";
-import { md } from "./format.js";
+import { md, html } from "./format.js";
 import {
   generateExcelTemplate,
   parseCsvBuffer,
@@ -130,11 +130,17 @@ async function deleteUserMessage(ctx: MyContext) {
   } catch {}
 }
 
-export async function sendOrEditScreen(ctx: MyContext, text: string, kb?: InlineKeyboard) {
+export async function sendOrEditScreen(
+  ctx: MyContext,
+  text: string,
+  kb?: InlineKeyboard,
+  parseMode?: "Markdown" | "HTML"
+) {
   const chatId = ctx.chat?.id;
   if (!chatId) return;
 
   const isPrivate = ctx.chat?.type === "private";
+  const mode = parseMode || (text.includes("<blockquote") || text.includes("<b>") || text.includes("<code>") ? "HTML" : "Markdown");
 
   // 1. В приватном диалоге сразу удаляем входящее сообщение пользователя
   if (isPrivate && ctx.message?.message_id) {
@@ -145,7 +151,7 @@ export async function sendOrEditScreen(ctx: MyContext, text: string, kb?: Inline
   if (ctx.callbackQuery?.message?.message_id) {
     try {
       await ctx.editMessageText(text, {
-        parse_mode: "Markdown",
+        parse_mode: mode,
         reply_markup: kb
       });
       activeScreenMessageMap.set(chatId, ctx.callbackQuery.message.message_id);
@@ -166,7 +172,7 @@ export async function sendOrEditScreen(ctx: MyContext, text: string, kb?: Inline
   // 4. Отправляем единственный актуальный экран
   try {
     const sent = await ctx.reply(text, {
-      parse_mode: "Markdown",
+      parse_mode: mode,
       reply_markup: kb
     });
     activeScreenMessageMap.set(chatId, sent.message_id);
@@ -1008,20 +1014,22 @@ bot.callbackQuery(/^order_view_(\d+)$/, async (ctx) => {
 
   const statusName = STATUS_ICONS[order.status] || order.status;
 
-  let text = `📋 **Заявка #${order.id}** [${statusName}]\n`;
+  let text = `📋 <b>Заявка #${order.id}</b> [${statusName}]\n`;
   text += `━━━━━━━━━━━━━━━━━━━━\n`;
-  text += `👤 **Клиент:** ${md(order.user_name)}\n`;
-  text += `📞 **Телефон:** ${md(order.phone || "не указан")}\n`;
+  text += `👤 <b>Клиент:</b> ${html(order.user_name)}\n`;
+  text += `📞 <b>Телефон:</b> ${html(order.phone || "не указан")}\n`;
   if (order.comment && order.comment !== "Без комментария") {
-    text += `💬 **Пожелание:** ${md(order.comment)}\n`;
+    text += `💬 <b>Пожелание:</b> <i>${html(order.comment)}</i>\n`;
   }
-  text += `🕒 **Дата:** ${order.created_at}\n\n`;
+  text += `🕒 <b>Дата:</b> ${order.created_at}\n\n`;
 
-  text += `📦 **Состав заявки:**\n`;
+  text += `📦 <b>Состав накладной:</b>\n`;
+  text += `<blockquote expandable>\n`;
   for (const item of items) {
-    text += `• ${md(item.name)} — ${item.quantity} шт. × ${item.price} ₽ = ${item.subtotal} ₽\n`;
+    text += `• ${html(item.name)} — ${item.quantity} шт. × ${item.price} ₽ = ${item.subtotal} ₽\n`;
   }
-  text += `\n💰 **ИТОГО:** **${order.total_price} ₽**\n`;
+  text += `</blockquote>\n`;
+  text += `💰 <b>ИТОГО:</b> <b>${order.total_price} ₽</b>\n`;
 
   const buildKb = (withContact: boolean) => {
     const kb = new InlineKeyboard();
@@ -1058,9 +1066,38 @@ bot.callbackQuery(/^order_status_(\d+)_(in_progress|completed)$/, async (ctx) =>
   const status = ctx.match[2] as "in_progress" | "completed";
 
   dbService.updateOrderStatus(orderId, status);
-  await ctx.answerCallbackQuery({ text: `Статус заявки #${orderId} изменен!` });
 
   const order = dbService.getOrderById(orderId);
+  const isGroup = ctx.chat?.type === "group" || ctx.chat?.type === "supergroup";
+
+  // Bot API 10.2+ Ephemeral message in group chat
+  if (isGroup && ctx.chat?.id && ctx.from?.id) {
+    try {
+      await ctx.api.sendMessage(ctx.chat.id,
+        status === "in_progress"
+          ? `🔒 <b>Лично для вас:</b> Заказ #${orderId} взят в работу.\n👤 Клиент: <b>${html(order?.user_name || "Покупатель")}</b>\n📞 Телефон: <code>${html(order?.phone || "не указан")}</code>`
+          : `🔒 <b>Лично для вас:</b> Заказ #${orderId} успешно завершен и отгружен.`,
+        {
+          parse_mode: "HTML",
+          ephemeral_message_parameters: {
+            receiver_user_id: ctx.from.id,
+            callback_query_id: ctx.callbackQuery?.id
+          }
+        }
+      );
+      await ctx.answerCallbackQuery();
+    } catch {
+      await ctx.answerCallbackQuery({
+        text: status === "in_progress"
+          ? `Заказ #${orderId} в работе. Телефон: ${order?.phone || "не указан"}`
+          : `Заказ #${orderId} завершен!`,
+        show_alert: true
+      });
+    }
+  } else {
+    await ctx.answerCallbackQuery({ text: `Статус заявки #${orderId} изменен!` });
+  }
+
   if (order) {
     const statusText = status === "in_progress"
       ? `⏳ Ваша заявка #${order.id} принята в работу!`
@@ -1089,7 +1126,26 @@ bot.callbackQuery(/^order_cancel_(\d+)$/, async (ctx) => {
     return;
   }
 
-  await ctx.answerCallbackQuery({ text: `Заявка #${orderId} отменена, товары возвращены на склад!` });
+  const isGroup = ctx.chat?.type === "group" || ctx.chat?.type === "supergroup";
+  if (isGroup && ctx.chat?.id && ctx.from?.id) {
+    try {
+      await ctx.api.sendMessage(ctx.chat.id,
+        `🔒 <b>Лично для вас:</b> Заявка #${orderId} отменена, остатки возвращены на склад.`,
+        {
+          parse_mode: "HTML",
+          ephemeral_message_parameters: {
+            receiver_user_id: ctx.from.id,
+            callback_query_id: ctx.callbackQuery?.id
+          }
+        }
+      );
+      await ctx.answerCallbackQuery();
+    } catch {
+      await ctx.answerCallbackQuery({ text: `Заявка #${orderId} отменена, товары возвращены на склад!`, show_alert: true });
+    }
+  } else {
+    await ctx.answerCallbackQuery({ text: `Заявка #${orderId} отменена, товары возвращены на склад!` });
+  }
 
   const order = dbService.getOrderById(orderId);
   if (order) {
@@ -1574,19 +1630,22 @@ async function notifyAdminAndUserAboutOrder(params: {
 }) {
   const targetChat = dbService.getOrdersChatId() || dbService.getAdminId();
   if (targetChat) {
-    let orderMsg = `🔔 **НОВАЯ ЗАЯВКА #${params.orderId} (Mini App)**\n`;
+    let orderMsg = `🔔 <b>НОВАЯ ЗАЯВКА #${params.orderId} (Mini App)</b>\n`;
     orderMsg += `━━━━━━━━━━━━━━━━━━━━\n`;
-    orderMsg += `👤 **Клиент / Заведение:** ${md(params.userName)}\n`;
-    orderMsg += `🆔 **Telegram ID:** \`${params.userId}\`\n`;
-    orderMsg += `📞 **Телефон:** ${md(params.phone)}\n`;
+    orderMsg += `👤 <b>Клиент / Заведение:</b> ${html(params.userName)}\n`;
+    orderMsg += `🆔 <b>Telegram ID:</b> <code>${params.userId}</code>\n`;
+    orderMsg += `📞 <b>Телефон:</b> ${html(params.phone)}\n`;
     if (params.comment && params.comment !== "Без комментария") {
-      orderMsg += `💬 **Комментарий:** ${md(params.comment)}\n`;
+      orderMsg += `💬 <b>Комментарий:</b> ${html(params.comment)}\n`;
     }
-    orderMsg += `\n📦 **Состав заказа:**\n`;
+    orderMsg += `\n📦 <b>Состав накладной:</b>\n`;
+    orderMsg += `<blockquote expandable>\n`;
     for (const item of params.items) {
-      orderMsg += `• ${md(item.name)} — ${item.quantity} шт. × ${item.price} ₽ = ${item.subtotal} ₽\n`;
+      orderMsg += `• ${html(item.name)} — ${item.quantity} шт. × ${item.price} ₽ = ${item.subtotal} ₽\n`;
     }
-    orderMsg += `\n💰 **ИТОГО:** **${params.total} ₽**`;
+    orderMsg += `</blockquote>\n`;
+    const totalPieces = params.items.reduce((s, x) => s + x.quantity, 0);
+    orderMsg += `💰 <b>ИТОГО: ${params.total} ₽</b> (${totalPieces} шт.)`;
 
     const manageKb = new InlineKeyboard()
       .text("⏳ В работу", `order_status_${params.orderId}_in_progress`)
@@ -1599,7 +1658,7 @@ async function notifyAdminAndUserAboutOrder(params: {
 
     try {
       await bot.api.sendMessage(targetChat, orderMsg, {
-        parse_mode: "Markdown",
+        parse_mode: "HTML",
         reply_markup: manageKb
       });
     } catch (e: any) {
@@ -1608,21 +1667,27 @@ async function notifyAdminAndUserAboutOrder(params: {
   }
 
   if (params.chatId) {
-    let userSummary = `✅ **Заявка #${params.orderId} успешно принята через Mini App!**\n\n`;
-    userSummary += `💰 Сумма к оплате: **${params.total} ₽**\n`;
-    userSummary += `📞 Контакт: **${md(params.phone)}**\n`;
+    let userSummary = `✅ <b>Заявка #${params.orderId} принята на сборку!</b>\n\n`;
+    userSummary += `💰 Сумма к оплате: <b>${params.total} ₽</b>\n`;
+    userSummary += `📞 Контакт: <b>${html(params.phone)}</b>\n`;
     if (params.comment && params.comment !== "Без комментария") {
-      userSummary += `💬 Пожелание: ${md(params.comment)}\n`;
+      userSummary += `💬 Пожелание: <i>${html(params.comment)}</i>\n`;
     }
-    userSummary += `\nМенеджер склада уже получил заказ и свяжется с вами!`;
+    userSummary += `\n📋 <b>Состав накладной:</b>\n`;
+    userSummary += `<blockquote expandable>\n`;
+    for (const item of params.items) {
+      userSummary += `• ${html(item.name)} — ${item.quantity} шт. × ${item.price} ₽ = ${item.subtotal} ₽\n`;
+    }
+    userSummary += `</blockquote>\n`;
+    userSummary += `Менеджер склада уже получил заказ и готовит отгрузку!`;
 
     const backKb = new InlineKeyboard()
-      .text("📁 Каталог товаров", "cat_nav_root").row()
+      .webApp("🛍 Открыть склад (МойСклад)", `${WEBAPP_URL}/app`).row()
       .text("📋 Мои заказы", "user_orders");
 
     try {
       const confMsg = await bot.api.sendMessage(params.chatId, userSummary, {
-        parse_mode: "Markdown",
+        parse_mode: "HTML",
         reply_markup: backKb
       });
       activeScreenMessageMap.set(params.chatId, confMsg.message_id);
