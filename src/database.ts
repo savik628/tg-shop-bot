@@ -77,6 +77,30 @@ try {
   }
 }
 
+try {
+  db.exec("ALTER TABLE products ADD COLUMN brand TEXT DEFAULT ''");
+} catch (e: any) {
+  if (!e?.message?.toLowerCase().includes("duplicate column")) {
+    throw e;
+  }
+}
+
+try {
+  db.exec("ALTER TABLE products ADD COLUMN packaging TEXT DEFAULT ''");
+} catch (e: any) {
+  if (!e?.message?.toLowerCase().includes("duplicate column")) {
+    throw e;
+  }
+}
+
+try {
+  db.exec("ALTER TABLE products ADD COLUMN sku TEXT DEFAULT ''");
+} catch (e: any) {
+  if (!e?.message?.toLowerCase().includes("duplicate column")) {
+    throw e;
+  }
+}
+
 // Гарантированное создание структуры категорий по умолчанию
 function ensureDefaultCategories() {
   const findCat = (name: string, parentId: number | null) => {
@@ -156,6 +180,9 @@ export interface Product {
   id: number;
   category_id: number;
   name: string;
+  brand?: string;
+  packaging?: string;
+  sku?: string;
   description: string;
   price: number;
   stock: number;
@@ -452,13 +479,30 @@ export const dbService = {
       SELECT p.*, c.name as category_name
       FROM products p
       JOIN categories c ON p.category_id = c.id
-      ORDER BY p.name ASC
+      ORDER BY p.brand ASC, p.name ASC
     `).all() as Array<Product & { category_name: string }>;
 
     return rows.map(r => ({
       ...r,
+      brand: r.brand || "",
+      packaging: r.packaging || "",
+      sku: r.sku || "",
       path: this.getCategoryPathString(r.category_id)
     }));
+  },
+
+  getUniqueBrands(): string[] {
+    const rows = db.prepare(`
+      SELECT DISTINCT brand FROM products WHERE brand IS NOT NULL AND TRIM(brand) != '' ORDER BY brand ASC
+    `).all() as { brand: string }[];
+    return rows.map(r => r.brand);
+  },
+
+  getUniquePackagings(): string[] {
+    const rows = db.prepare(`
+      SELECT DISTINCT packaging FROM products WHERE packaging IS NOT NULL AND TRIM(packaging) != '' ORDER BY packaging ASC
+    `).all() as { packaging: string }[];
+    return rows.map(r => r.packaging);
   },
 
   getAllCategoriesList(): Category[] {
@@ -478,7 +522,10 @@ export const dbService = {
     name: string,
     description: string,
     price: number,
-    stock: number
+    stock: number,
+    brand: string = "",
+    packaging: string = "",
+    sku: string = ""
   ): { id: number; isUpdated: boolean; totalStock: number; name: string; price: number } {
     const trimmedName = name.trim();
     const existing = db.prepare(`
@@ -489,8 +536,8 @@ export const dbService = {
     if (existing) {
       const newStock = existing.stock + stock;
       db.prepare(`
-        UPDATE products SET stock = ?, price = ? WHERE id = ?
-      `).run(newStock, price, existing.id);
+        UPDATE products SET stock = ?, price = ?, brand = COALESCE(NULLIF(?, ''), brand), packaging = COALESCE(NULLIF(?, ''), packaging), sku = COALESCE(NULLIF(?, ''), sku) WHERE id = ?
+      `).run(newStock, price, brand.trim(), packaging.trim(), sku.trim(), existing.id);
       return {
         id: existing.id,
         isUpdated: true,
@@ -501,10 +548,10 @@ export const dbService = {
     }
 
     const stmt = db.prepare(`
-      INSERT INTO products (category_id, name, description, price, stock)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO products (category_id, name, description, price, stock, brand, packaging, sku)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    const info = stmt.run(categoryId, trimmedName, description.trim(), price, stock);
+    const info = stmt.run(categoryId, trimmedName, description.trim(), price, stock, brand.trim(), packaging.trim(), sku.trim());
     return {
       id: Number(info.lastInsertRowid),
       isUpdated: false,

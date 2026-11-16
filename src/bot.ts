@@ -54,14 +54,14 @@ export const WEBAPP_URL = process.env.APP_URL || "https://tg-shop-bot-obnn.onren
 bot.api.setChatMenuButton({
   menu_button: {
     type: "web_app",
-    text: "🛍 Магазин",
+    text: "🛍 МойСклад",
     web_app: { url: `${WEBAPP_URL}/app` }
   }
 }).catch(() => {});
 
 // Публичное меню Telegram (только для покупателей — никаких служебных админ-команд!)
 bot.api.setMyCommands([
-  { command: "start", description: "📁 Каталог товаров" },
+  { command: "start", description: "🏢 Терминал склада" },
   { command: "cart", description: "🛒 Корзина заказа" },
   { command: "orders", description: "📋 Мои заказы" },
   { command: "profile", description: "👤 Мой профиль" },
@@ -106,21 +106,19 @@ function getBottomKeyboard(ctx: MyContext): Keyboard {
   const cartLabel = cartCount > 0 ? `🛒 Корзина (${cartCount})` : "🛒 Корзина";
 
   const kb = new Keyboard()
-    .webApp("🛍 Открыть витрину (Mini App)", `${WEBAPP_URL}/app`)
-    .row()
-    .text("📁 Склад")
-    .text(cartLabel)
+    .webApp("🛍 Открыть склад (МойСклад)", `${WEBAPP_URL}/app`)
     .row();
 
   if (isAdm) {
     const newOrders = dbService.getNewOrdersCount();
     const ordersLabel = newOrders > 0 ? `📋 Заявки (${newOrders} 🆕)` : "📋 Заявки";
+    kb.text("📁 Склад").text(cartLabel).row();
     kb.text(ordersLabel).text("⚙️ Управление");
   } else {
     const customName = uid ? dbService.getUserProfileName(uid) : null;
-    const profileLabel = customName ? `👤 ${customName}` : "👤 Моё имя";
-    kb.text("📋 Мои заказы").text(profileLabel).row();
-    kb.text(`🏢 ${dbService.getVenueName()}`);
+    const profileLabel = customName ? `👤 ${customName}` : "👤 Профиль";
+    kb.text(cartLabel).text("📋 Мои заказы").row();
+    kb.text(profileLabel).text(`🏢 ${dbService.getVenueName()}`);
   }
 
   return kb.resized();
@@ -1106,10 +1104,44 @@ bot.callbackQuery(/^order_cancel_(\d+)$/, async (ctx) => {
 
 // ======================== ИНТУИТИВНЫЙ СКЛАД ========================
 
-async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
+async function renderWarehouseView(ctx: MyContext, categoryId: number | null, forceFolders: boolean = false) {
   const isAdm = isAdmin(ctx);
   const userId = ctx.from?.id;
   if (userId) activeCategoryMap.set(userId, categoryId);
+
+  const cartCount = userId ? dbService.getCartTotalCount(userId) : 0;
+  const cartLabel = cartCount > 0 ? `🛒 Корзина (${cartCount})` : "🛒 Корзина";
+
+  // ГЛАВНЫЙ ЭКРАН (ROOT) В СТИЛЕ МОЙСКЛАД
+  if (categoryId === null && !forceFolders) {
+    const stats = dbService.getStats();
+    const venue = dbService.getVenueName();
+    let text = `🏢 **${md(venue)} • Склад**\n`;
+    text += `━━━━━━━━━━━━━━━━━━━━\n`;
+    text += `📦 В наличии: **${stats.productsCount} позиций**\n`;
+    text += `⚡️ Режим терминала: **МойСклад (ERP)**\n`;
+    text += `Мгновенный выбор товаров по брендам, фасовкам и вкусам:\n`;
+
+    const kb = new InlineKeyboard()
+      .webApp("🛍 Открыть склад (МойСклад)", `${WEBAPP_URL}/app`).row()
+      .text(cartLabel, "menu_cart")
+      .text("📋 Мои заказы", "user_orders").row();
+
+    if (isAdm) {
+      kb.text("⚙️ Управление", "admin_panel")
+        .text("🔄 Google Таблица", "admin_sheets_quick_sync").row();
+    } else {
+      const customName = userId ? dbService.getUserProfileName(userId) : null;
+      const profileLabel = customName ? `👤 ${customName}` : "👤 Профиль";
+      kb.text(profileLabel, "user_profile")
+        .text("🏢 Контакты", "user_contacts").row();
+    }
+
+    kb.text("📁 Каталог по папкам в чате", "cat_nav_browse_folders");
+
+    await sendOrEditScreen(ctx, text, kb);
+    return;
+  }
 
   let subcategories = dbService.getCategoriesWithStats(categoryId);
   if (!isAdm) {
@@ -1117,14 +1149,14 @@ async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
   }
   const products = categoryId !== null ? dbService.getProductsByCategory(categoryId) : [];
   const currentCategory = categoryId !== null ? dbService.getCategoryById(categoryId) : null;
-  const pathTitle = dbService.getCategoryPathString(categoryId);
+  const pathTitle = categoryId !== null ? dbService.getCategoryPathString(categoryId) : "Все папки склада";
 
   const cartMap = userId ? dbService.getCartItemsMap(userId) : new Map<number, number>();
 
   const kb = new InlineKeyboard();
 
   // Быстрый запуск Mini App прямо в диалоговом окне
-  kb.webApp("🛍 Открыть витрину (Mini App)", `${WEBAPP_URL}/app`).row();
+  kb.webApp("🛍 Открыть склад (МойСклад)", `${WEBAPP_URL}/app`).row();
 
   // 1. Папки
   subcategories.forEach((sub, idx) => {
@@ -1167,14 +1199,12 @@ async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
   }
 
   // 4. Минималистичная навигация (Назад и Корзина)
-  const cartCount = userId ? dbService.getCartTotalCount(userId) : 0;
-  const cartLabel = cartCount > 0 ? `🛒 Корзина (${cartCount})` : "🛒 Корзина";
-
   if (categoryId !== null && currentCategory) {
     const backTarget = currentCategory.parent_id !== null ? `cat_nav_${currentCategory.parent_id}` : "cat_nav_root";
     kb.text("◀️ Назад", backTarget);
     kb.text(cartLabel, "menu_cart").row();
   } else {
+    kb.text("◀️ На главную", "cat_nav_root");
     kb.text(cartLabel, "menu_cart").row();
   }
 
@@ -1195,6 +1225,11 @@ async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
 
   await sendOrEditScreen(ctx, text, kb);
 }
+
+bot.callbackQuery("cat_nav_browse_folders", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await renderWarehouseView(ctx, null, true);
+});
 
 bot.callbackQuery("cat_nav_root", async (ctx) => {
   await ctx.answerCallbackQuery();
@@ -1735,12 +1770,14 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // 3. API: Каталог товаров и категорий для Mini App
+  // 3. API: Каталог товаров и категорий для Mini App (МойСклад)
   if (pathname === "/api/products" && req.method === "GET") {
     try {
       const venue = dbService.getVenueName();
       const categories = dbService.getAllCategoriesList();
       const products = dbService.getAllProductsWithCategory();
+      const brands = dbService.getUniqueBrands();
+      const packagings = dbService.getUniquePackagings();
 
       res.writeHead(200, {
         "Content-Type": "application/json; charset=utf-8",
@@ -1749,6 +1786,8 @@ const server = http.createServer((req, res) => {
       res.end(JSON.stringify({
         success: true,
         venue,
+        brands,
+        packagings,
         categories,
         products
       }));
