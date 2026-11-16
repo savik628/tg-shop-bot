@@ -59,33 +59,8 @@ bot.api.setChatMenuButton({
   }
 }).catch(() => {});
 
-// Публичное меню Telegram (только для покупателей — никаких служебных админ-команд!)
-bot.api.setMyCommands([
-  { command: "start", description: "🏢 Терминал склада" },
-  { command: "cart", description: "🛒 Корзина заказа" },
-  { command: "orders", description: "📋 Мои заказы" },
-  { command: "profile", description: "👤 Мой профиль" },
-  { command: "contacts", description: "🏢 Контакты и время работы" }
-]).catch(() => {});
-
-// Персональное меню с панелью управления — регистрируется ТОЛЬКО в чате владельца
-export function updateAdminCommands(adminId: number) {
-  bot.api.setMyCommands([
-    { command: "start", description: "📁 Каталог и Склад" },
-    { command: "cart", description: "🛒 Корзина заказа" },
-    { command: "orders", description: "📋 Заявки склада" },
-    { command: "admin", description: "⚙️ Панель управления" },
-    { command: "sync", description: "🔄 Синхронизировать Google" }
-  ], {
-    scope: { type: "chat", chat_id: adminId }
-  }).catch(() => {});
-}
-
-// При старте проверяем, известен ли владелец
-const initAdminId = dbService.getAdminId();
-if (initAdminId) {
-  updateAdminCommands(initAdminId);
-}
+// Удаляем все текстовые команды из меню Telegram (интерфейс переведён в единое диалоговое HTML-окно)
+bot.api.deleteMyCommands().catch(() => {});
 
 function isAdmin(ctx: MyContext): boolean {
   const currentAdmin = dbService.getAdminId();
@@ -97,31 +72,41 @@ function isOwner(ctx: MyContext): boolean {
   return Boolean(currentAdmin && ctx.from?.id === currentAdmin);
 }
 
-// Умная нижняя клавиатура с динамическими бейджами
-function getBottomKeyboard(ctx: MyContext): Keyboard {
-  const uid = ctx.from?.id;
-  const isAdm = isAdmin(ctx);
+// Удаление клавиатур для чистого HTML интерфейса
+function getBottomKeyboard(ctx?: MyContext): any {
+  return { remove_keyboard: true };
+}
 
-  const cartCount = uid ? dbService.getCartTotalCount(uid) : 0;
-  const cartLabel = cartCount > 0 ? `🛒 Корзина (${cartCount})` : "🛒 Корзина";
+export async function sendHtmlDialogLauncher(ctx: MyContext) {
+  const chatId = ctx.chat?.id;
+  if (!chatId) return;
 
-  const kb = new Keyboard()
-    .webApp("🛍 Открыть склад (МойСклад)", `${WEBAPP_URL}/app`)
-    .row();
+  const stats = dbService.getStats();
+  const venue = dbService.getVenueName();
 
-  if (isAdm) {
-    const newOrders = dbService.getNewOrdersCount();
-    const ordersLabel = newOrders > 0 ? `📋 Заявки (${newOrders} 🆕)` : "📋 Заявки";
-    kb.text("📁 Склад").text(cartLabel).row();
-    kb.text(ordersLabel).text("⚙️ Управление");
-  } else {
-    const customName = uid ? dbService.getUserProfileName(uid) : null;
-    const profileLabel = customName ? `👤 ${customName}` : "👤 Профиль";
-    kb.text(cartLabel).text("📋 Мои заказы").row();
-    kb.text(profileLabel).text(`🏢 ${dbService.getVenueName()}`);
+  let text = `<b>🏢 ${html(venue)} • Оптовый терминал склада</b>\n\n`;
+  text += `<blockquote expandable>\n`;
+  text += `📦 <b>${stats.productsCount} позиций в наличии</b>\n`;
+  text += `Интерфейс склада переведён в единое диалоговое HTML-окно Telegram.\n\n`;
+  text += `• 📦 <b>Склад:</b> номенклатура, бренды, фасовки, остатки\n`;
+  text += `• 📋 <b>Заказы:</b> история накладных и онлайн-статусы сборки\n`;
+  text += `• 🏢 <b>О складе:</b> контакты, адрес отгрузки и режим работы\n`;
+  text += `• ⚡️ <b>Заказ в 1 клик:</b> расчёт и мгновенная отправка заявки\n`;
+  text += `</blockquote>\n\n`;
+  text += `👇 Нажмите кнопку ниже или <b>🛍 МойСклад</b> в левом нижнем углу:`;
+
+  const kb = new InlineKeyboard()
+    .webApp("🛍 Открыть склад (МойСклад)", `${WEBAPP_URL}/app`);
+
+  try {
+    const sent = await ctx.reply(text, {
+      parse_mode: "HTML",
+      reply_markup: kb
+    });
+    activeScreenMessageMap.set(chatId, sent.message_id);
+  } catch (err: any) {
+    console.error("Ошибка отображения диалогового экрана:", err?.message);
   }
-
-  return kb.resized();
 }
 
 async function deleteUserMessage(ctx: MyContext) {
@@ -283,32 +268,13 @@ bot.command("start", async (ctx) => {
     if (prev) {
       await ctx.api.deleteMessage(chatId, prev).catch(() => {});
     }
-    const init = await ctx.reply("⚡️ Загрузка каталога...", { reply_markup: getBottomKeyboard(ctx) });
-    setTimeout(() => {
-      ctx.api.deleteMessage(chatId, init.message_id).catch(() => {});
-    }, 1200);
   }
-  await renderWarehouseView(ctx, null);
+  await sendHtmlDialogLauncher(ctx);
 });
 
-bot.command("cart", async (ctx) => {
+bot.command(["cart", "orders", "profile", "name", "info", "contacts", "catalog"], async (ctx) => {
   await deleteUserMessage(ctx);
-  await renderCartView(ctx);
-});
-
-bot.command("orders", async (ctx) => {
-  await deleteUserMessage(ctx);
-  await renderOrdersList(ctx);
-});
-
-bot.command(["profile", "name", "info"], async (ctx) => {
-  await deleteUserMessage(ctx);
-  await showCustomerProfile(ctx);
-});
-
-bot.command("contacts", async (ctx) => {
-  await deleteUserMessage(ctx);
-  await showContacts(ctx);
+  await sendHtmlDialogLauncher(ctx);
 });
 
 bot.command("admin", async (ctx) => {
@@ -805,6 +771,44 @@ async function showGoogleSheetsDashboard(ctx: MyContext) {
   await sendOrEditScreen(ctx, text, kb);
 }
 
+export async function syncGoogleSheetsDirect(): Promise<{
+  success: boolean;
+  error?: string;
+  count?: number;
+  categoriesCreated?: number;
+  productsCreated?: number;
+  productsUpdated?: number;
+  timestamp?: string;
+}> {
+  const url = dbService.getGoogleSheetsUrl();
+  if (!url) {
+    return { success: false, error: "Google Таблица не привязана" };
+  }
+
+  const fetchRes = await fetchGoogleSheetsBuffer(url);
+  if (!fetchRes.success || !fetchRes.buffer) {
+    return { success: false, error: fetchRes.error || "Сбой загрузки таблицы" };
+  }
+
+  const parseRes = parseCsvBuffer(fetchRes.buffer);
+  if (parseRes.items.length === 0) {
+    return { success: false, error: "В Google Таблице не найдены строки с товарами" };
+  }
+
+  const importRes = importProductsToDb(parseRes.items, "replace_stock");
+  const nowStr = new Date().toLocaleString("ru-RU", { timeZone: "Europe/Moscow" });
+  dbService.setGoogleSheetsLastSync(nowStr);
+
+  return {
+    success: true,
+    count: parseRes.items.length,
+    categoriesCreated: importRes.categoriesCreated,
+    productsCreated: importRes.productsCreated,
+    productsUpdated: importRes.productsUpdated,
+    timestamp: nowStr
+  };
+}
+
 async function syncGoogleSheetsAction(ctx: MyContext) {
   if (!isAdmin(ctx)) {
     return ctx.reply("❌ Доступно только администратору.");
@@ -822,35 +826,23 @@ async function syncGoogleSheetsAction(ctx: MyContext) {
   const waitMsg = await ctx.reply("⏳ Загружаю актуальные данные из Google Таблицы...");
 
   try {
-    const fetchRes = await fetchGoogleSheetsBuffer(url);
-    if (!fetchRes.success || !fetchRes.buffer) {
-      await ctx.api.deleteMessage(ctx.chat!.id, waitMsg.message_id).catch(() => {});
-      return ctx.reply(`❌ **Ошибка загрузки Google Таблицы:**\n\n${fetchRes.error || "сбой соединения"}\n\nПроверьте доступ: «Все, у кого есть ссылка — Читатель».`, { parse_mode: "Markdown" });
-    }
-
-    const parseRes = parseCsvBuffer(fetchRes.buffer);
-    if (parseRes.items.length === 0) {
-      await ctx.api.deleteMessage(ctx.chat!.id, waitMsg.message_id).catch(() => {});
-      return ctx.reply("❌ В Google Таблице не найдены строки с товарами. Проверьте заголовки колонок: `Категория`, `Товар`, `Цена`, `Количество`.");
-    }
-
-    const importRes = importProductsToDb(parseRes.items, "replace_stock");
-    const nowStr = new Date().toLocaleString("ru-RU", { timeZone: "Europe/Moscow" });
-    dbService.setGoogleSheetsLastSync(nowStr);
-
+    const res = await syncGoogleSheetsDirect();
     await ctx.api.deleteMessage(ctx.chat!.id, waitMsg.message_id).catch(() => {});
+
+    if (!res.success) {
+      return ctx.reply(`❌ **Ошибка:** ${res.error}`);
+    }
 
     let text = `✅ **Склад успешно синхронизирован с Google Таблицей!**\n`;
     text += `━━━━━━━━━━━━━━━━━━━━\n`;
-    text += `🕒 Время: **${nowStr}**\n`;
-    text += `📦 Товаров в таблице: **${parseRes.items.length} шт.**\n`;
-    text += `📁 Создано новых папок: **${importRes.categoriesCreated}**\n`;
-    text += `📦 Новых позиций создано: **${importRes.productsCreated} шт.**\n`;
-    text += `🔄 Существующих позиций обновлено: **${importRes.productsUpdated} шт.**\n`;
+    text += `🕒 Время: **${res.timestamp}**\n`;
+    text += `📦 Товаров в таблице: **${res.count} шт.**\n`;
+    text += `📁 Создано новых папок: **${res.categoriesCreated}**\n`;
+    text += `📦 Новых позиций создано: **${res.productsCreated} шт.**\n`;
+    text += `🔄 Существующих позиций обновлено: **${res.productsUpdated} шт.**\n`;
 
     const kb = new InlineKeyboard()
-      .text("📁 Открыть Склад", "cat_nav_root").row()
-      .text("⚙️ В управление", "admin_main");
+      .webApp("🛍 Открыть склад (МойСклад)", `${WEBAPP_URL}/app`);
 
     await sendOrEditScreen(ctx, text, kb);
   } catch (err: any) {
@@ -1682,8 +1674,7 @@ async function notifyAdminAndUserAboutOrder(params: {
     userSummary += `Менеджер склада уже получил заказ и готовит отгрузку!`;
 
     const backKb = new InlineKeyboard()
-      .webApp("🛍 Открыть склад (МойСклад)", `${WEBAPP_URL}/app`).row()
-      .text("📋 Мои заказы", "user_orders");
+      .webApp("🛍 Открыть склад (МойСклад)", `${WEBAPP_URL}/app`);
 
     try {
       const confMsg = await bot.api.sendMessage(params.chatId, userSummary, {
@@ -1753,7 +1744,7 @@ bot.on([
   await ctx.deleteMessage().catch(() => {});
   const chatId = ctx.chat.id;
   if (!activeScreenMessageMap.get(chatId)) {
-    await renderWarehouseView(ctx, null);
+    await sendHtmlDialogLauncher(ctx);
   }
 });
 
@@ -1918,7 +1909,158 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // 5. CORS preflight
+  // 5. API: Сведения о складе и правах пользователя
+  if (pathname === "/api/info" && req.method === "GET") {
+    try {
+      const rawUid = parsedUrl.searchParams.get("userId");
+      const userId = Number(rawUid) || 0;
+      const adminId = dbService.getAdminId();
+      const isAdmin = Boolean(adminId && userId === adminId);
+      const venue = dbService.getVenueName();
+      const contacts = dbService.getVenueContacts();
+      const stats = dbService.getStats();
+      const sheetsUrl = Boolean(dbService.getGoogleSheetsUrl());
+      const sheetsLastSync = dbService.getGoogleSheetsLastSync();
+
+      res.writeHead(200, {
+        "Content-Type": "application/json; charset=utf-8",
+        "Access-Control-Allow-Origin": "*"
+      });
+      res.end(JSON.stringify({
+        success: true,
+        venue,
+        contacts,
+        isAdmin,
+        adminId,
+        stats,
+        sheetsUrl,
+        sheetsLastSync
+      }));
+    } catch (err: any) {
+      res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ success: false, error: err.message }));
+    }
+    return;
+  }
+
+  // 6. API: Заказы (пользовательские или все для админа)
+  if (pathname === "/api/orders" && req.method === "GET") {
+    try {
+      const rawUid = parsedUrl.searchParams.get("userId");
+      const userId = Number(rawUid) || 0;
+      const adminId = dbService.getAdminId();
+      const isAdmin = Boolean(adminId && userId === adminId);
+
+      const rawOrders = isAdmin ? dbService.getOrders() : (userId > 0 ? dbService.getUserOrders(userId) : []);
+      const orders = rawOrders.map(o => {
+        let items: any[] = [];
+        try { items = JSON.parse(o.items_json); } catch {}
+        return {
+          id: o.id,
+          userId: o.user_id,
+          userName: o.user_name,
+          phone: o.phone,
+          comment: o.comment,
+          totalPrice: o.total_price,
+          status: o.status,
+          createdAt: o.created_at,
+          items
+        };
+      });
+
+      res.writeHead(200, {
+        "Content-Type": "application/json; charset=utf-8",
+        "Access-Control-Allow-Origin": "*"
+      });
+      res.end(JSON.stringify({ success: true, orders }));
+    } catch (err: any) {
+      res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ success: false, error: err.message }));
+    }
+    return;
+  }
+
+  // 7. API: Обновление статуса заказа администратором
+  if (pathname === "/api/orders/status" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: any) => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        const payload = JSON.parse(body || "{}");
+        const { orderId, status, userId } = payload;
+        const adminId = dbService.getAdminId();
+        if (!adminId || Number(userId) !== adminId) {
+          res.writeHead(403, {
+            "Content-Type": "application/json; charset=utf-8",
+            "Access-Control-Allow-Origin": "*"
+          });
+          return res.end(JSON.stringify({ success: false, error: "Доступ запрещен" }));
+        }
+
+        if (status === "cancelled") {
+          dbService.cancelOrderWithStockRefund(Number(orderId));
+        } else {
+          dbService.updateOrderStatus(Number(orderId), status);
+        }
+
+        const order = dbService.getOrderById(Number(orderId));
+        if (order && order.user_id) {
+          const statusLabels: Record<string, string> = {
+            in_progress: "⏳ Ваша заявка передана на сборку!",
+            completed: "✅ Заявка готова к выдаче/отгрузке!",
+            cancelled: "⚪️ Заявка отменена."
+          };
+          const msg = statusLabels[status];
+          if (msg) {
+            bot.api.sendMessage(order.user_id, `<b>Заявка #${order.id}</b>\n${msg}`, { parse_mode: "HTML" }).catch(() => {});
+          }
+        }
+
+        res.writeHead(200, {
+          "Content-Type": "application/json; charset=utf-8",
+          "Access-Control-Allow-Origin": "*"
+        });
+        res.end(JSON.stringify({ success: true }));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ success: false, error: err.message }));
+      }
+    });
+    return;
+  }
+
+  // 8. API: 1-Click Синхронизация с Google Таблицей
+  if (pathname === "/api/sync" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: any) => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        const payload = JSON.parse(body || "{}");
+        const { userId } = payload;
+        const adminId = dbService.getAdminId();
+        if (!adminId || Number(userId) !== adminId) {
+          res.writeHead(403, {
+            "Content-Type": "application/json; charset=utf-8",
+            "Access-Control-Allow-Origin": "*"
+          });
+          return res.end(JSON.stringify({ success: false, error: "Доступ запрещен" }));
+        }
+
+        const syncRes = await syncGoogleSheetsDirect();
+        res.writeHead(200, {
+          "Content-Type": "application/json; charset=utf-8",
+          "Access-Control-Allow-Origin": "*"
+        });
+        res.end(JSON.stringify(syncRes));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ success: false, error: err.message }));
+      }
+    });
+    return;
+  }
+
+  // 9. CORS preflight
   if (req.method === "OPTIONS") {
     res.writeHead(204, {
       "Access-Control-Allow-Origin": "*",
