@@ -13,6 +13,7 @@ import {
   ParsedItem
 } from "./excel.js";
 import { fetchGoogleSheetsBuffer, extractSpreadsheetId } from "./googleSheets.js";
+import { getWebAppHtml } from "./webapp_template.js";
 import {
   checkoutConversation,
   addCategoryConversation,
@@ -46,6 +47,17 @@ bot.use(createConversation(updateStockConversation));
 bot.use(createConversation(transferOwnerConversation));
 bot.use(createConversation(editCustomerNameConversation));
 bot.use(createConversation(bindGoogleSheetsConversation));
+
+export const WEBAPP_URL = process.env.APP_URL || "https://tg-shop-bot-obnn.onrender.com";
+
+// Нативная кнопка WebApp в левом нижнем углу диалогового окна
+bot.api.setChatMenuButton({
+  menu_button: {
+    type: "web_app",
+    text: "🛍 Магазин",
+    web_app: { url: `${WEBAPP_URL}/app` }
+  }
+}).catch(() => {});
 
 // Публичное меню Telegram (только для покупателей — никаких служебных админ-команд!)
 bot.api.setMyCommands([
@@ -94,6 +106,8 @@ function getBottomKeyboard(ctx: MyContext): Keyboard {
   const cartLabel = cartCount > 0 ? `🛒 Корзина (${cartCount})` : "🛒 Корзина";
 
   const kb = new Keyboard()
+    .webApp("🛍 Открыть витрину (Mini App)", `${WEBAPP_URL}/app`)
+    .row()
     .text("📁 Склад")
     .text(cartLabel)
     .row();
@@ -1109,6 +1123,9 @@ async function renderWarehouseView(ctx: MyContext, categoryId: number | null) {
 
   const kb = new InlineKeyboard();
 
+  // Быстрый запуск Mini App прямо в диалоговом окне
+  kb.webApp("🛍 Открыть витрину (Mini App)", `${WEBAPP_URL}/app`).row();
+
   // 1. Папки
   subcategories.forEach((sub, idx) => {
     const countTag = sub.products_count > 0 ? ` [${sub.products_count} 📦]` : "";
@@ -1508,6 +1525,122 @@ bot.callbackQuery("cart_checkout", async (ctx) => {
   await ctx.conversation.enter("checkoutConversation");
 });
 
+// Уведомление администратора и подтверждение покупателю при оформлении заказа
+async function notifyAdminAndUserAboutOrder(params: {
+  orderId: number;
+  userId: number;
+  userName: string;
+  phone: string;
+  comment: string;
+  items: OrderItem[];
+  total: number;
+  username?: string;
+  chatId?: number;
+}) {
+  const targetChat = dbService.getOrdersChatId() || dbService.getAdminId();
+  if (targetChat) {
+    let orderMsg = `🔔 **НОВАЯ ЗАЯВКА #${params.orderId} (Mini App)**\n`;
+    orderMsg += `━━━━━━━━━━━━━━━━━━━━\n`;
+    orderMsg += `👤 **Клиент / Заведение:** ${md(params.userName)}\n`;
+    orderMsg += `🆔 **Telegram ID:** \`${params.userId}\`\n`;
+    orderMsg += `📞 **Телефон:** ${md(params.phone)}\n`;
+    if (params.comment && params.comment !== "Без комментария") {
+      orderMsg += `💬 **Комментарий:** ${md(params.comment)}\n`;
+    }
+    orderMsg += `\n📦 **Состав заказа:**\n`;
+    for (const item of params.items) {
+      orderMsg += `• ${md(item.name)} — ${item.quantity} шт. × ${item.price} ₽ = ${item.subtotal} ₽\n`;
+    }
+    orderMsg += `\n💰 **ИТОГО:** **${params.total} ₽**`;
+
+    const manageKb = new InlineKeyboard()
+      .text("⏳ В работу", `order_status_${params.orderId}_in_progress`)
+      .text("✅ Выполнен", `order_status_${params.orderId}_completed`).row()
+      .text("❌ Отменить (вернуть на склад)", `order_cancel_${params.orderId}`);
+
+    if (params.username) {
+      manageKb.row().url("💬 Написать клиенту", `https://t.me/${params.username}`);
+    }
+
+    try {
+      await bot.api.sendMessage(targetChat, orderMsg, {
+        parse_mode: "Markdown",
+        reply_markup: manageKb
+      });
+    } catch (e: any) {
+      console.error(`Ошибка отправки уведомления о заказе #${params.orderId}:`, e?.message || e);
+    }
+  }
+
+  if (params.chatId) {
+    let userSummary = `✅ **Заявка #${params.orderId} успешно принята через Mini App!**\n\n`;
+    userSummary += `💰 Сумма к оплате: **${params.total} ₽**\n`;
+    userSummary += `📞 Контакт: **${md(params.phone)}**\n`;
+    if (params.comment && params.comment !== "Без комментария") {
+      userSummary += `💬 Пожелание: ${md(params.comment)}\n`;
+    }
+    userSummary += `\nМенеджер склада уже получил заказ и свяжется с вами!`;
+
+    const backKb = new InlineKeyboard()
+      .text("📁 Каталог товаров", "cat_nav_root").row()
+      .text("📋 Мои заказы", "user_orders");
+
+    try {
+      const confMsg = await bot.api.sendMessage(params.chatId, userSummary, {
+        parse_mode: "Markdown",
+        reply_markup: backKb
+      });
+      activeScreenMessageMap.set(params.chatId, confMsg.message_id);
+    } catch (e: any) {
+      console.error(`Ошибка отправки подтверждения покупателю:`, e?.message || e);
+    }
+  }
+}
+
+// Приём заказов из встроенного Telegram Mini App (через sendData)
+bot.on("message:web_app_data", async (ctx) => {
+  const userId = ctx.from?.id;
+  if (!userId) return;
+
+  try {
+    const rawData = ctx.message.web_app_data.data;
+    const payload = JSON.parse(rawData);
+    const { name, phone, comment, items } = payload;
+
+    const customName = dbService.getUserProfileName(userId);
+    const baseName = name || customName || [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" ") || "Покупатель";
+    const userTag = ctx.from.username ? `@${ctx.from.username}` : "нет юзернейма";
+    const clientDisplayName = customName ? `${customName} (${userTag})` : `${baseName} (${userTag})`;
+
+    const orderRes = dbService.checkoutOrderDirect(
+      userId,
+      clientDisplayName,
+      phone || "Не указан",
+      comment || "Без комментария",
+      items || []
+    );
+
+    if (orderRes.success && orderRes.orderId && orderRes.items) {
+      await notifyAdminAndUserAboutOrder({
+        orderId: orderRes.orderId,
+        userId,
+        userName: clientDisplayName,
+        phone: phone || "Не указан",
+        comment: comment || "Без комментария",
+        items: orderRes.items,
+        total: orderRes.total || 0,
+        username: ctx.from.username,
+        chatId: ctx.chat.id
+      });
+    } else {
+      await ctx.reply(`❌ Ошибка оформления заявки: ${orderRes.error || "Неизвестная ошибка"}`);
+    }
+  } catch (err: any) {
+    console.error("Ошибка обработки web_app_data:", err);
+    await ctx.reply("❌ Не удалось обработать данные заказа из приложения.");
+  }
+});
+
 // Автоматическая очистка любых посторонних сообщений пользователя в приватном чате (Single-Window / App-режим)
 bot.on([
   "message:text",
@@ -1573,10 +1706,14 @@ async function autoRestoreFromGoogleSheetsIfEmpty() {
   }
 }
 
-// HTTP healthcheck для Render и мониторингов
+// HTTP сервер: Healthcheck, Telegram Mini App HTML и API каталога/заказов
 const PORT = process.env.PORT || 3000;
 const server = http.createServer((req, res) => {
-  if (req.url === "/health" || req.url === "/ping" || req.url === "/") {
+  const parsedUrl = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+  const pathname = parsedUrl.pathname;
+
+  // 1. Healthcheck для Render и мониторингов (UptimeRobot)
+  if (pathname === "/health" || pathname === "/ping" || pathname === "/api/health") {
     const stats = dbService.getStats();
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({
@@ -1587,6 +1724,117 @@ const server = http.createServer((req, res) => {
     }));
     return;
   }
+
+  // 2. Telegram Mini App Frontend (HTML)
+  if (pathname === "/app" || pathname === "/webapp") {
+    res.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-cache"
+    });
+    res.end(getWebAppHtml());
+    return;
+  }
+
+  // 3. API: Каталог товаров и категорий для Mini App
+  if (pathname === "/api/products" && req.method === "GET") {
+    try {
+      const venue = dbService.getVenueName();
+      const categories = dbService.getAllCategoriesList();
+      const products = dbService.getAllProductsWithCategory();
+
+      res.writeHead(200, {
+        "Content-Type": "application/json; charset=utf-8",
+        "Access-Control-Allow-Origin": "*"
+      });
+      res.end(JSON.stringify({
+        success: true,
+        venue,
+        categories,
+        products
+      }));
+    } catch (err: any) {
+      res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ success: false, error: err.message }));
+    }
+    return;
+  }
+
+  // 4. API: Оформление заказа (REST fallback)
+  if (pathname === "/api/order" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: any) => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        const payload = JSON.parse(body || "{}");
+        const { name, phone, comment, items, userId: rawUserId } = payload;
+        const userId = Number(rawUserId) || 0;
+
+        const displayName = name || "Покупатель (Web)";
+        const orderRes = dbService.checkoutOrderDirect(
+          userId,
+          displayName,
+          phone || "Не указан",
+          comment || "Без комментария",
+          items || []
+        );
+
+        if (orderRes.success && orderRes.orderId && orderRes.items) {
+          await notifyAdminAndUserAboutOrder({
+            orderId: orderRes.orderId,
+            userId,
+            userName: displayName,
+            phone: phone || "Не указан",
+            comment: comment || "Без комментария",
+            items: orderRes.items,
+            total: orderRes.total || 0,
+            chatId: userId > 0 ? userId : undefined
+          });
+
+          res.writeHead(200, {
+            "Content-Type": "application/json; charset=utf-8",
+            "Access-Control-Allow-Origin": "*"
+          });
+          res.end(JSON.stringify({
+            success: true,
+            orderId: orderRes.orderId,
+            total: orderRes.total
+          }));
+        } else {
+          res.writeHead(400, {
+            "Content-Type": "application/json; charset=utf-8",
+            "Access-Control-Allow-Origin": "*"
+          });
+          res.end(JSON.stringify({ success: false, error: orderRes.error || "Ошибка создания заказа" }));
+        }
+      } catch (err: any) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ success: false, error: err.message }));
+      }
+    });
+    return;
+  }
+
+  // 5. CORS preflight
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type"
+    });
+    res.end();
+    return;
+  }
+
+  // Главная страница / - также открывает витрину
+  if (pathname === "/") {
+    res.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-cache"
+    });
+    res.end(getWebAppHtml());
+    return;
+  }
+
   res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
   res.end("Not Found");
 });

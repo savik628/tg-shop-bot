@@ -447,6 +447,24 @@ export const dbService = {
   },
 
   // Товары
+  getAllProductsWithCategory(): Array<Product & { category_name: string; path: string }> {
+    const rows = db.prepare(`
+      SELECT p.*, c.name as category_name
+      FROM products p
+      JOIN categories c ON p.category_id = c.id
+      ORDER BY p.name ASC
+    `).all() as Array<Product & { category_name: string }>;
+
+    return rows.map(r => ({
+      ...r,
+      path: this.getCategoryPathString(r.category_id)
+    }));
+  },
+
+  getAllCategoriesList(): Category[] {
+    return db.prepare("SELECT * FROM categories ORDER BY name ASC").all() as Category[];
+  },
+
   getProductsByCategory(categoryId: number): Product[] {
     return db.prepare("SELECT * FROM products WHERE category_id = ? ORDER BY name ASC").all(categoryId) as Product[];
   },
@@ -673,6 +691,70 @@ export const dbService = {
       const info = orderStmt.run(userId, userName, phone, comment, total, JSON.stringify(orderItems));
 
       this.clearCart(userId);
+
+      return { orderId: Number(info.lastInsertRowid), total, items: orderItems };
+    });
+
+    try {
+      const res = tx();
+      return { success: true, ...res };
+    } catch (err: any) {
+      return { success: false, error: err.message || "Ошибка при оформлении заказа" };
+    }
+  },
+
+  // Прямое оформление заказа из Mini App (по списку товаров)
+  checkoutOrderDirect(
+    userId: number,
+    userName: string,
+    phone: string,
+    comment: string,
+    items: Array<{ id: number; quantity: number }>
+  ): { success: boolean; error?: string; orderId?: number; total?: number; items?: OrderItem[] } {
+    if (!items || items.length === 0) {
+      return { success: false, error: "Корзина пуста" };
+    }
+
+    const tx = db.transaction(() => {
+      let total = 0;
+      const orderItems: OrderItem[] = [];
+
+      for (const item of items) {
+        if (!item.id || item.quantity <= 0) continue;
+        const prod = db.prepare("SELECT stock, price, name FROM products WHERE id = ?").get(item.id) as { stock: number; price: number; name: string } | undefined;
+        if (!prod) {
+          throw new Error(`Товар с ID ${item.id} не найден`);
+        }
+        if (prod.stock < item.quantity) {
+          throw new Error(`Недостаточно товара "${prod.name}" на складе (осталось: ${prod.stock} шт.)`);
+        }
+
+        db.prepare("UPDATE products SET stock = stock - ? WHERE id = ?").run(item.quantity, item.id);
+
+        const subtotal = item.quantity * prod.price;
+        total += subtotal;
+        orderItems.push({
+          product_id: item.id,
+          name: prod.name,
+          price: prod.price,
+          quantity: item.quantity,
+          subtotal
+        });
+      }
+
+      if (orderItems.length === 0) {
+        throw new Error("Нет выбранных товаров");
+      }
+
+      const orderStmt = db.prepare(`
+        INSERT INTO orders (user_id, user_name, phone, comment, total_price, items_json, status)
+        VALUES (?, ?, ?, ?, ?, ?, 'new')
+      `);
+      const info = orderStmt.run(userId, userName, phone, comment, total, JSON.stringify(orderItems));
+
+      if (userName && userName.trim().length > 0) {
+        this.setUserProfileName(userId, userName);
+      }
 
       return { orderId: Number(info.lastInsertRowid), total, items: orderItems };
     });
