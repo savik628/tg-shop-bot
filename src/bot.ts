@@ -48,7 +48,7 @@ bot.use(createConversation(transferOwnerConversation));
 bot.use(createConversation(editCustomerNameConversation));
 bot.use(createConversation(bindGoogleSheetsConversation));
 
-export const WEBAPP_URL = process.env.APP_URL || "https://vivclub.online";
+export const WEBAPP_URL = process.env.APP_URL || "https://tg-shop-bot-obnn.onrender.com";
 
 // Нативная кнопка WebApp в левом нижнем углу диалогового окна
 bot.api.setChatMenuButton({
